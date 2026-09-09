@@ -171,12 +171,45 @@ contract HTLCNativeDomainTest is Test {
         assertTrue(htlc.isActive(preimageHash, amount, address(0), alice, bob, timelock), "still active");
     }
 
-    /// The domain is fixed at deployment: a fork that changes `chainid` afterwards keeps
-    /// the deployment chain's separator, so signatures never become valid on both.
+    /// The domain is deliberately fixed at deployment. Should a fork ever change
+    /// `chainid`, both forks keep the deployment separator and a signature made before
+    /// the fork settles on both. That is accepted: the swap state is identical on both
+    /// forks and a redeem pays the signed destination on each, so the claimant only
+    /// settles a swap they are already entitled to. Signatures made after the fork,
+    /// with the new chain id in the domain, are rejected by both.
     function test_domainSeparatorIsPinnedAtDeployment() public {
         bytes32 before = htlc.DOMAIN_SEPARATOR();
         vm.chainId(block.chainid + 1);
-        assertEq(htlc.DOMAIN_SEPARATOR(), before, "immutable");
+        assertEq(htlc.DOMAIN_SEPARATOR(), before, "immutable across a chain-id change");
+    }
+
+    function test_preForkSignatureStillRedeemsAfterChainIdChange() public {
+        vm.prank(alice);
+        htlc.create{value: amount}(preimageHash, bob, timelock);
+
+        // Signed under the deployment chain id, submitted after the chain id changed.
+        (uint8 v, bytes32 r, bytes32 s) = _signNative(htlc.DOMAIN_SEPARATOR(), relayer);
+        vm.chainId(block.chainid + 1);
+
+        vm.prank(relayer);
+        htlc.redeemBySig(preimage, amount, alice, timelock, bob, address(0), 0, bytes32(0), v, r, s);
+
+        assertEq(relayer.balance, amount, "the signed caller is paid on the forked chain too");
+    }
+
+    function test_postForkSignatureWithNewChainId_doesNotRedeem() public {
+        vm.prank(alice);
+        htlc.create{value: amount}(preimageHash, bob, timelock);
+
+        vm.chainId(block.chainid + 1);
+        bytes32 newChainDomain = keccak256(
+            abi.encode(EIP712_DOMAIN_TYPEHASH, keccak256("HTLCNative"), keccak256("1"), block.chainid, address(htlc))
+        );
+        (uint8 v, bytes32 r, bytes32 s) = _signNative(newChainDomain, relayer);
+
+        vm.prank(relayer);
+        vm.expectPartialRevert(HTLCNative.SwapNotActive.selector);
+        htlc.redeemBySig(preimage, amount, alice, timelock, bob, address(0), 0, bytes32(0), v, r, s);
     }
 
     // -- Off-chain vector --
