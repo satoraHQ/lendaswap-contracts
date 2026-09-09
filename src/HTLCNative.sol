@@ -214,19 +214,21 @@ contract HTLCNative is Ownable2Step {
     }
 
     /// @notice Redeem the coins using an EIP-712 signature from the claimAddress (gasless / delegated)
-    /// @dev Anyone can call this function. The claimAddress is recovered from the signature
-    ///      which includes msg.sender as the authorized caller, destination, sweepToken,
-    ///      minAmountOut, and callsHash. The coins are sent to msg.sender (not claimAddress).
-    ///      All execution parameters are cryptographically bound to the signature, so the
-    ///      outcome is guaranteed by the signer regardless of who submits the transaction.
+    /// @dev Anyone may submit this call, but the signature binds `caller` to `msg.sender`,
+    ///      so only the address the claimant named can settle with it. The coins are paid
+    ///      to that caller unconditionally: `destination`, `sweepToken`, `minAmountOut` and
+    ///      `callsHash` are hashed into the signed message so the caller cannot alter them,
+    ///      but this contract does not act on them. They are guarantees only when `caller`
+    ///      is a contract that enforces them after receiving the coins (the coordinator).
+    ///      A signature whose `caller` is an EOA hands the swap amount to that EOA.
     /// @param preimage Secret whose SHA-256 hash matches the preimageHash used at creation
     /// @param amount Amount that was locked
     /// @param sender Address that created the swap
     /// @param timelock Timelock that was set at creation
-    /// @param destination Address where the caller intends to route funds after redeem
-    /// @param sweepToken Token the caller will sweep to destination (bound to signature)
-    /// @param minAmountOut Minimum amount of sweepToken required (bound to signature)
-    /// @param callsHash Hash of the calls array (bound to signature, prevents call substitution)
+    /// @param destination Address where the caller intends to route funds after redeem (bound to signature, enforced by `caller`, not here)
+    /// @param sweepToken Token the caller will sweep to destination (bound to signature, enforced by `caller`, not here)
+    /// @param minAmountOut Minimum amount of sweepToken required (bound to signature, enforced by `caller`, not here)
+    /// @param callsHash Hash of the calls array (bound to signature, enforced by `caller`, not here)
     /// @param v ECDSA recovery id
     /// @param r ECDSA signature component
     /// @param s ECDSA signature component

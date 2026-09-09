@@ -225,7 +225,10 @@ contract HTLCNativeDomainTest is Test {
         uint256 claimPk = 0x4444444444444444444444444444444444444444444444444444444444444444;
         address claimant = vm.addr(claimPk);
         address sender = 0x3333333333333333333333333333333333333333;
-        address caller = 0x5555555555555555555555555555555555555555;
+        // In production `caller` is the coordinator contract, which enforces the
+        // destination / sweep terms after the HTLC pays it. The vector keeps a fixed
+        // address so the pinned digest and signature below stay stable.
+        address coordinator = 0x5555555555555555555555555555555555555555;
         bytes32 fixturePreimage = bytes32(uint256(0x1111111111111111111111111111111111111111111111111111111111111111));
         uint256 fixtureAmount = 100_000_000;
         uint256 fixtureTimelock = 1_800_000_000;
@@ -237,7 +240,7 @@ contract HTLCNativeDomainTest is Test {
                 fixtureAmount,
                 sender,
                 fixtureTimelock,
-                caller,
+                coordinator,
                 claimant,
                 address(0),
                 uint256(0),
@@ -265,19 +268,19 @@ contract HTLCNativeDomainTest is Test {
         assertEq(r, 0xc4c95466427c3cb06f1fe5787ba79e0d6fca9a3f0b63db8f0fe1778c23c233e6, "r");
         assertEq(s, 0x1dc3d44c7270f846d8093cac1c2641c51ed02c3e26e546ab49c383a21223fbf1, "s");
 
-        // The vector settles: lock under the fixture's terms and submit it as `caller`.
+        // The vector settles: lock under the fixture's terms and submit it as `coordinator`.
         // (The sha256 precompile is a call and would consume the prank if inlined.)
         bytes32 fixtureHash = sha256(abi.encodePacked(fixturePreimage));
         vm.deal(sender, fixtureAmount);
         vm.prank(sender);
         fixture.create{value: fixtureAmount}(fixtureHash, claimant, fixtureTimelock);
 
-        vm.prank(caller);
+        vm.prank(coordinator);
         address recovered = fixture.redeemBySig(
             fixturePreimage, fixtureAmount, sender, fixtureTimelock, claimant, address(0), 0, bytes32(0), v, r, s
         );
         assertEq(recovered, claimant, "vector recovers the claimant");
-        assertEq(caller.balance, fixtureAmount, "vector settles");
+        assertEq(coordinator.balance, fixtureAmount, "vector settles");
     }
 
     // -- Helpers --
