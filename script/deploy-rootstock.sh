@@ -29,6 +29,20 @@ if [[ "${2:-}" == "--dry-run" ]]; then
   DRY_RUN=true
 fi
 
+# .env first: ROOTSTOCK_RPC_URL may live there and the case below reads it.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CONTRACTS_DIR="$(dirname "$SCRIPT_DIR")"
+
+for f in "$SCRIPT_DIR/.env" "$CONTRACTS_DIR/.env"; do
+  if [ -f "$f" ]; then
+    set -a
+    # shellcheck disable=SC1090
+    source "$f"
+    set +a
+    break
+  fi
+done
+
 case "$NETWORK" in
   testnet)
     CHAIN_ID=31
@@ -47,19 +61,6 @@ case "$NETWORK" in
     exit 1
     ;;
 esac
-
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CONTRACTS_DIR="$(dirname "$SCRIPT_DIR")"
-
-for f in "$SCRIPT_DIR/.env" "$CONTRACTS_DIR/.env"; do
-  if [ -f "$f" ]; then
-    set -a
-    # shellcheck disable=SC1090
-    source "$f"
-    set +a
-    break
-  fi
-done
 
 if [ -z "${MNEMONIC:-}" ]; then
   echo "Error: MNEMONIC is not set."
