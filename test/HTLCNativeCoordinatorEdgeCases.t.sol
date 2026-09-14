@@ -75,7 +75,12 @@ contract HTLCNativeCoordinatorEdgeCasesTest is NativeCoordinatorFixture {
         assertFalse(dest.reentrySucceeded(), "reentry blocked");
         assertEq(dest.reentryError(), CallExecutor.Reentrancy.selector, "guard fired");
         assertEq(address(dest).balance, amount, "sweep still paid");
-        assertEq(coordinator.deposits(_key(amount)), alice, "other deposit untouched");
+        assertEq(
+            coordinator.deposits(htlc.computeKey(h2, amount, address(0), address(coordinator), bob, timelock)),
+            alice,
+            "other deposit untouched"
+        );
+        assertEq(coordinator.deposits(_key(amount)), address(0), "settled deposit cleared");
     }
 
     function test_reentryFromCallTarget_blocked() public {

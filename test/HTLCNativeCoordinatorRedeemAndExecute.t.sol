@@ -20,6 +20,51 @@ contract HTLCNativeCoordinatorRedeemAndExecuteTest is NativeCoordinatorFixture {
         assertEq(uint8(state), uint8(HTLCNative.SwapState.Redeemed), "redeemed");
         assertEq(revealed, preimage, "preimage stored");
         assertEq(address(coordinator).balance, 0, "coordinator empty");
+        assertEq(coordinator.deposits(_key(amount)), address(0), "deposit record cleared on redeem");
+    }
+
+    function test_redeemOfDirectlyCreatedSwap_leavesDepositsAlone() public {
+        // A swap Alice created straight on the HTLC has no deposit record; the
+        // coordinator must not touch the mapping when settling it.
+        bytes32 h2 = sha256(abi.encodePacked(bytes32(uint256(0xcafe))));
+        vm.prank(alice);
+        htlc.create{value: amount}(h2, bob, timelock);
+        (uint8 v, bytes32 r, bytes32 s) = _signRedeemFor(bytes32(uint256(0xcafe)), alice, bob);
+        vm.prank(relayer);
+        coordinator.redeemAndExecute(
+            bytes32(uint256(0xcafe)), amount, alice, timelock, noCalls, address(0), amount, bob, v, r, s
+        );
+        assertEq(bob.balance, amount, "bob paid");
+        assertEq(coordinator.deposits(_key(amount)), alice, "unrelated deposit record intact");
+    }
+
+    /// Bob's signature for a swap with an explicit preimage and HTLC sender.
+    function _signRedeemFor(bytes32 _preimage, address sender, address destination)
+        internal
+        view
+        returns (uint8 v, bytes32 r, bytes32 s)
+    {
+        bytes32 digest = keccak256(
+            abi.encodePacked(
+                "\x19\x01",
+                htlc.DOMAIN_SEPARATOR(),
+                keccak256(
+                    abi.encode(
+                        htlc.TYPEHASH_REDEEM(),
+                        _preimage,
+                        amount,
+                        sender,
+                        timelock,
+                        address(coordinator),
+                        destination,
+                        address(0),
+                        amount,
+                        _callsHash(noCalls)
+                    )
+                )
+            )
+        );
+        (v, r, s) = vm.sign(bobPk, digest);
     }
 
     function test_sweepToOtherDestination_signedByBob() public {

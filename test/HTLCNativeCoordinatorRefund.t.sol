@@ -112,10 +112,13 @@ contract HTLCNativeCoordinatorRefundTest is NativeCoordinatorFixture {
     function test_refundAfterRedeem_reverts() public {
         _redeemVia(noCalls, address(0), amount, bob);
         vm.warp(timelock);
-        vm.expectRevert(
-            abi.encodeWithSelector(HTLCNative.SwapNotActive.selector, _key(amount), HTLCNative.SwapState.Redeemed)
-        );
+        // The redeem cleared the deposit record, so the coordinator rejects
+        // the refund before the HTLC would (SwapNotActive).
+        vm.expectRevert(HTLCNativeCoordinator.UnknownHtlc.selector);
         coordinator.refundTo(preimageHash, amount, bob, timelock);
+        vm.prank(alice);
+        vm.expectRevert(HTLCNativeCoordinator.UnknownHtlc.selector);
+        coordinator.refundAndExecute(preimageHash, amount, bob, timelock, noCalls, address(0), 0);
     }
 
     function test_redeemAfterRefund_reverts() public {

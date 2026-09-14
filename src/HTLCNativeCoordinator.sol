@@ -129,9 +129,18 @@ contract HTLCNativeCoordinator is CallExecutor {
         // destination, sweepToken, minAmountOut and callsHash, so no separate check
         // is needed here and the execution parameters cannot be tampered with.
         bytes32 callsHash = _computeCallsHash(calls);
-        HTLC_NATIVE.redeemBySig(
+        address claimAddress = HTLC_NATIVE.redeemBySig(
             preimage, amount, htlcSender, timelock, destination, sweepToken, minAmountOut, callsHash, v, r, s
         );
+
+        // A swap this coordinator created is settled now; drop its deposit
+        // record so `deposits` only ever names unsettled swaps.
+        if (htlcSender == address(this)) {
+            bytes32 preimageHash = sha256(abi.encodePacked(preimage));
+            delete deposits[
+                HTLC_NATIVE.computeKey(preimageHash, amount, address(0), address(this), claimAddress, timelock)
+            ];
+        }
 
         _executeCalls(calls);
         _sweep(destination, sweepToken, minAmountOut);
@@ -183,8 +192,8 @@ contract HTLCNativeCoordinator is CallExecutor {
     /// @param claimAddress Claim address set at HTLC creation
     /// @param timelock     Timelock set at HTLC creation
     function refundTo(bytes32 preimageHash, uint256 amount, address claimAddress, uint256 timelock)
-    external
-    nonReentrant
+        external
+        nonReentrant
     {
         SwapKey key = HTLC_NATIVE.computeKey(preimageHash, amount, address(0), address(this), claimAddress, timelock);
         address depositor = deposits[key];
