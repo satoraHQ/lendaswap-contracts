@@ -1,0 +1,7 @@
+{
+  "executeAndCreate_0calls": "82895",
+  "executeAndCreate_1call": "93311",
+  "executeAndCreate_3calls": "101143",
+  "htlcNative_redeem_direct": "58257",
+  "redeemAndExecute_0calls": "73875"
+}
