@@ -83,6 +83,18 @@ contract HTLCNativeCoordinatorRedeemAndExecuteTest is NativeCoordinatorFixture {
         assertEq(address(coordinator).balance, 0, "coordinator empty");
     }
 
+    function test_zeroDestination_reverts() public {
+        // A claimant that signs an unset destination must not burn the coin.
+        (uint8 v, bytes32 r, bytes32 s) =
+            _signRedeem(bobPk, address(coordinator), address(0), address(0), amount, _callsHash(noCalls));
+        vm.prank(relayer);
+        vm.expectRevert(CallExecutor.ZeroDestination.selector);
+        coordinator.redeemAndExecute(
+            preimage, amount, address(coordinator), timelock, noCalls, address(0), amount, address(0), v, r, s
+        );
+        assertTrue(_isActive(amount), "swap untouched");
+    }
+
     function test_minAmountOutBreach_reverts() public {
         (uint8 v, bytes32 r, bytes32 s) =
             _signRedeem(bobPk, address(coordinator), bob, address(0), amount + 1, _callsHash(noCalls));

@@ -25,6 +25,9 @@ abstract contract CallExecutor {
     /// @dev One of the arbitrary calls failed; carries its index in the batch.
     error CallFailed(uint256 index);
     error EtherTransferFailed();
+    /// @dev A sweep to address(0) would burn the balance (a native transfer
+    ///      there succeeds); a signed or recorded zero destination is a bug.
+    error ZeroDestination();
     /// @dev The call targets a contract calls must never touch (HTLC, self, Permit2).
     error RestrictedTarget(address target);
     /// @dev The calldata starts with a transferFrom-family selector that could
@@ -79,6 +82,8 @@ abstract contract CallExecutor {
     ///      to `destination`, requiring at least `minAmountOut`. A zero balance that
     ///      satisfies the minimum is a no-op.
     function _sweep(address destination, address token, uint256 minAmountOut) internal {
+        if (destination == address(0)) revert ZeroDestination();
+
         uint256 balance;
         if (token == address(0)) {
             balance = address(this).balance;
