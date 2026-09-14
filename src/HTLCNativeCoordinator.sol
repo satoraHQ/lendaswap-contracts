@@ -52,12 +52,16 @@ contract HTLCNativeCoordinator is CallExecutor {
 
     /// @notice Run arbitrary calls funded by `msg.value`, then lock exactly `amount` of
     ///         the native coin in an HTLC with the coordinator as sender
-    /// @dev Sending the value is the authorisation: `msg.sender` is the depositor. The
-    ///      calls may consume `msg.value` (`Call.value`) and produce native coin (e.g. a
-    ///      DEX swap or a WRBTC unwrap); what they may not do is touch balance that was
-    ///      here before the call. Whatever they net above `amount` is returned to the
-    ///      depositor, so the lock is exact and its key is known before the transaction
-    ///      is sent. A plain lock is `calls = []`, `amount == msg.value`.
+    /// @dev Sending the value is the authorisation: `msg.sender` is the depositor, and
+    ///      `msg.value` is the only input. The calls may spend it (`Call.value`, e.g. a
+    ///      DEX swap paid in the coin) and produce native coin; what they may not do is
+    ///      touch balance that was here before the call. Whatever they net above
+    ///      `amount` is returned to the depositor, so the lock is exact and its key is
+    ///      known before the transaction is sent. A plain lock is `calls = []`,
+    ///      `amount == msg.value`. The coordinator holds nothing between transactions:
+    ///      a token sent here ahead of a call is a stray anyone can sweep, so ERC20
+    ///      input is not supported (an atomic smart-account batch is the caller's
+    ///      concern, not this contract's).
     ///      If the swap expires, only the depositor can call refundAndExecute; refundTo
     ///      is permissionless but always pays the depositor.
     /// @param calls        Arbitrary calls to execute before the lock

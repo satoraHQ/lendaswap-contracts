@@ -81,26 +81,29 @@ contract HTLCNativeCoordinatorExecuteAndCreateTest is NativeCoordinatorFixture {
         coordinator.executeAndCreate{value: amount}(calls, preimageHash, amount, bob, timelock);
     }
 
-    function test_callsProduceValue_unwrapWithPositiveSlippage() public {
-        // Alice holds WRBTC, hands it to the coordinator and unwraps it in the call
-        // batch: msg.value is 0, the calls produce the coin, the excess comes back.
-        vm.startPrank(alice);
-        wrbtc.deposit{value: amount + 0.2 ether}();
-        wrbtc.transfer(address(coordinator), amount + 0.2 ether);
-        vm.stopPrank();
+    function test_callsProduceExcess_returnedToDepositor() public {
+        // A favourable call nets more than `amount`; the excess goes back to
+        // the depositor and nothing stays on the coordinator.
+        Payer payer = new Payer();
+        vm.deal(address(payer), 1 ether);
+        CallExecutor.Call[] memory calls = _one(
+            CallExecutor.Call({
+                target: address(payer),
+                value: 0,
+                callData: abi.encodeWithSelector(Payer.pay.selector, address(coordinator), 0.2 ether)
+            })
+        );
 
-        CallExecutor.Call[] memory calls = _one(_unwrapCall(amount + 0.2 ether));
-
-        uint256 aliceBefore = alice.balance;
         vm.prank(alice);
-        coordinator.executeAndCreate(calls, preimageHash, amount, bob, timelock);
+        coordinator.executeAndCreate{value: amount}(calls, preimageHash, amount, bob, timelock);
 
         assertTrue(_isActive(amount), "locked amount");
-        assertEq(alice.balance, aliceBefore + 0.2 ether, "positive slippage returned");
+        assertEq(alice.balance, 10 ether - amount + 0.2 ether, "positive slippage returned");
         assertEq(address(coordinator).balance, 0, "nothing left behind");
     }
 
     function test_callsPaidByThirdParty_countsAsReceived() public {
+        // Coin the calls produce counts towards the lock, whoever sends it.
         Payer payer = new Payer();
         vm.deal(address(payer), 1 ether);
         CallExecutor.Call[] memory calls = _one(
