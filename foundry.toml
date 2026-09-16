@@ -9,6 +9,10 @@ evm_version = "cancun"
 # needed to avoid stack too deep errors
 via_ir = true
 
+fs_permissions = [
+  { access = "write", path = "./deployments.json" }
+]
+
 # Remappings
 remappings = [
   "@openzeppelin/=lib/openzeppelin-contracts/",

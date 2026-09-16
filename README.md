@@ -53,10 +53,10 @@ Three primary flows:
 
 ## Setup
 
-1. Navigate to the contracts directory:
+1. Install submodules if you haven't already:
 
 ```bash
-cd contracts
+git submodule update --init --recursive
 ```
 
 2. Install dependencies:
@@ -68,7 +68,7 @@ forge install
 3. Copy `.env.example` to `.env` and configure:
 
 ```bash
-cp ../.env.example .env
+cp .env.example .env
 ```
 
 Required environment variables:
