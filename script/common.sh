@@ -6,6 +6,7 @@
 #   ETH_RPC_URL           - Ethereum RPC endpoint
 #   ARBITRUM_RPC_URL      - Arbitrum RPC endpoint
 #   POLYGON_RPC_URL       - Polygon RPC endpoint
+#   ROOTSTOCK_RPC_URL     - Rootstock RPC endpoint (also read by deploy-rootstock.sh)
 #
 # Optional env vars:
 #   DERIVATION_INDEX      - HD derivation index (default: 0)
@@ -29,6 +30,7 @@ MISSING=()
 [ -z "${ETH_RPC_URL:-}" ] && MISSING+=("ETH_RPC_URL")
 [ -z "${ARBITRUM_RPC_URL:-}" ] && MISSING+=("ARBITRUM_RPC_URL")
 [ -z "${POLYGON_RPC_URL:-}" ] && MISSING+=("POLYGON_RPC_URL")
+[ -z "${ROOTSTOCK_RPC_URL:-}" ] && MISSING+=("ROOTSTOCK_RPC_URL")
 
 if [ ${#MISSING[@]} -gt 0 ]; then
   echo "Error: Missing required environment variables:"
@@ -41,12 +43,19 @@ fi
 DERIVATION_INDEX="${DERIVATION_INDEX:-0}"
 
 # ─── Chain definitions (parallel arrays, bash 3.2 compatible) ────────────────
-#           index:   0            1              2
-CHAINS=(       "ethereum"    "arbitrum"      "polygon"  )
-CHAIN_NAMES=(  "Ethereum"    "Arbitrum One"  "Polygon"  )
-CHAIN_RPCS=(   "$ETH_RPC_URL" "$ARBITRUM_RPC_URL" "$POLYGON_RPC_URL" )
-CHAIN_TOKENS=( "ETH"         "ETH"           "MATIC"    )
-CHAIN_IDS=(    "1"           "42161"         "137"      )
+# CHAIN_FAMILIES names the HTLC pair a chain runs: "erc20" (HTLCErc20 +
+# HTLCCoordinator, deployed by deploy-multichain.sh) or "native" (HTLCNative +
+# HTLCNativeCoordinator for the chain's own coin, deployed by
+# deploy-rootstock.sh with legacy transactions). The ERC20 deploy and gas
+# scripts skip native chains; balances cover every chain.
+#           index:   0            1              2            3
+CHAINS=(         "ethereum"    "arbitrum"      "polygon"    "rootstock" )
+CHAIN_NAMES=(    "Ethereum"    "Arbitrum One"  "Polygon"    "Rootstock" )
+CHAIN_RPCS=(     "$ETH_RPC_URL" "$ARBITRUM_RPC_URL" "$POLYGON_RPC_URL" "$ROOTSTOCK_RPC_URL" )
+CHAIN_TOKENS=(   "ETH"         "ETH"           "MATIC"      "RBTC" )
+CHAIN_IDS=(      "1"           "42161"         "137"        "30" )
+CHAIN_FAMILIES=( "erc20"       "erc20"         "erc20"      "native" )
+CHAIN_EXPLORERS=( "https://etherscan.io" "https://arbiscan.io" "https://polygonscan.com" "https://rootstock.blockscout.com" )
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -62,6 +71,12 @@ get_balance() {
 
 format_ether() {
   cast from-wei "$1" 2>/dev/null
+}
+
+# True for chains whose HTLC pair is the ERC20 family (deploy-multichain.sh's
+# contracts); the native family has its own deploy script.
+is_erc20_chain() {
+  [ "${CHAIN_FAMILIES[$1]}" = "erc20" ]
 }
 
 check_rpc() {

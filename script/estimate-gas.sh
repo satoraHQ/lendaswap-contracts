@@ -68,6 +68,13 @@ for i in "${!CHAINS[@]}"; do
   rpc="${CHAIN_RPCS[$i]}"
   token="${CHAIN_TOKENS[$i]}"
 
+  # The native pair deploys through deploy-rootstock.sh (legacy transactions).
+  if ! is_erc20_chain "$i"; then
+    printf "%-14s  %10s  %14s  %20s  %20s  %20s  %10s\n" \
+      "$name" "-" "-" "-" "-" "-" "native pair"
+    continue
+  fi
+
   # Check RPC connectivity
   if ! check_rpc "$i" 2>/dev/null; then
     printf "%-14s  %10s  %14s  %20s  %20s  %20s  %10s\n" \

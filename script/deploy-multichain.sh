@@ -105,6 +105,11 @@ for i in "${!CHAINS[@]}"; do
 
   printf "  %-14s " "$name:"
 
+  if ! is_erc20_chain "$i"; then
+    echo "SKIP (native HTLC pair; see deploy-rootstock.sh)"
+    continue
+  fi
+
   if ! check_rpc "$i"; then
     echo "SKIP (RPC unreachable or wrong chain ID)"
     continue
@@ -173,7 +178,7 @@ done
 # ─── Summary ──────────────────────────────────────────────────────────────────
 
 # Block-explorer address-page base per chain, indexed like CHAINS.
-EXPLORERS=( "https://etherscan.io" "https://arbiscan.io" "https://polygonscan.com" )
+EXPLORERS=( "${CHAIN_EXPLORERS[@]}" )
 
 echo "============================================"
 echo "  Deployment Summary"
