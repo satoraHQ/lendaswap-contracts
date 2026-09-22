@@ -6,9 +6,12 @@
 #   ETH_RPC_URL           - Ethereum RPC endpoint
 #   ARBITRUM_RPC_URL      - Arbitrum RPC endpoint
 #   POLYGON_RPC_URL       - Polygon RPC endpoint
-#   ROOTSTOCK_RPC_URL     - Rootstock RPC endpoint (also read by deploy-rootstock.sh)
 #
 # Optional env vars:
+#   ROOTSTOCK_RPC_URL     - Rootstock RPC endpoint (default: the public node,
+#                           as in deploy-rootstock.sh). Only balances.sh reads
+#                           Rootstock; the ERC20 deploy, gas and CCTP scripts
+#                           never do, so they must not require it.
 #   DERIVATION_INDEX      - HD derivation index (default: 0)
 
 set -euo pipefail
@@ -30,7 +33,6 @@ MISSING=()
 [ -z "${ETH_RPC_URL:-}" ] && MISSING+=("ETH_RPC_URL")
 [ -z "${ARBITRUM_RPC_URL:-}" ] && MISSING+=("ARBITRUM_RPC_URL")
 [ -z "${POLYGON_RPC_URL:-}" ] && MISSING+=("POLYGON_RPC_URL")
-[ -z "${ROOTSTOCK_RPC_URL:-}" ] && MISSING+=("ROOTSTOCK_RPC_URL")
 
 if [ ${#MISSING[@]} -gt 0 ]; then
   echo "Error: Missing required environment variables:"
@@ -40,6 +42,7 @@ if [ ${#MISSING[@]} -gt 0 ]; then
   exit 1
 fi
 
+ROOTSTOCK_RPC_URL="${ROOTSTOCK_RPC_URL:-https://public-node.rsk.co}"
 DERIVATION_INDEX="${DERIVATION_INDEX:-0}"
 
 # ─── Chain definitions (parallel arrays, bash 3.2 compatible) ────────────────
