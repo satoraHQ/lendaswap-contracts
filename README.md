@@ -157,6 +157,29 @@ Tokens:
 
 - tBTC: `0x6c84a8f1c29108F47a79964b5Fe888D4f4D0dE40`
 
+### Rootstock (Chain ID: 30)
+
+The lock asset is RBTC itself, so the pair is **HTLCNative v1** +
+**HTLCNativeCoordinator v1**, deployed with `script/deploy-rootstock.sh`
+(CREATE2, salt `0x…03`, legacy transactions, Blockscout verification).
+Addresses are lowercase: Rootstock tooling uses EIP-1191 checksums.
+
+- HTLCNative: [`0x18123a31261a76c74c82ed2f8346002caa78ab39`](https://rootstock.blockscout.com/address/0x18123a31261a76c74c82ed2f8346002caa78ab39)
+- HTLCNativeCoordinator: [`0x447a4cd711ce66d25c7008d26d5f09ca7d621f48`](https://rootstock.blockscout.com/address/0x447a4cd711ce66d25c7008d26d5f09ca7d621f48)
+
+### Rootstock Testnet (Chain ID: 31)
+
+Same salt, owner and bytecode as mainnet, so the same addresses (deployed
+2026-09-24, verified on [rootstock-testnet.blockscout.com](https://rootstock-testnet.blockscout.com)).
+Served by the mutinynet daemon under `network.rootstock_chain_id: 31`.
+
+- HTLCNative: [`0x18123a31261a76c74c82ed2f8346002caa78ab39`](https://rootstock-testnet.blockscout.com/address/0x18123a31261a76c74c82ed2f8346002caa78ab39)
+- HTLCNativeCoordinator: [`0x447a4cd711ce66d25c7008d26d5f09ca7d621f48`](https://rootstock-testnet.blockscout.com/address/0x447a4cd711ce66d25c7008d26d5f09ca7d621f48)
+
+Testnet RBTC: https://faucet.rootstock.io. A fresh account sending two
+transactions back to back trips RSKj's per-account tx-pool quota ("account
+exceeds quota"); the deploy script sends them one at a time and is safe to rerun.
+
 ### Legacy deployments
 
 Still live — in-flight swaps created on them settle against their stored

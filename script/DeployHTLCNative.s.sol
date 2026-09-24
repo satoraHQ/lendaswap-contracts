@@ -8,6 +8,11 @@ import {HTLCNativeCoordinator} from "../src/HTLCNativeCoordinator.sol";
 /// @notice Deploys the native-coin HTLC pair. Same key derivation, CREATE2 salt and
 ///         owner handling as DeployHTLCCoordinator.s.sol; see deploy-rootstock.sh for
 ///         the Rootstock-specific forge flags (legacy transactions, Blockscout).
+///
+///         Idempotent: a contract whose CREATE2 address already holds code is reused
+///         instead of redeployed, so a run that broke between the two deployments
+///         (Rootstock's per-account tx-pool quota rejects the second tx of a burst)
+///         is resumed by running the same command again.
 contract DeployHTLCNative is Script {
     function run() external {
         uint256 deployerPrivateKey;
@@ -29,12 +34,29 @@ contract DeployHTLCNative is Script {
 
         vm.startBroadcast(deployerPrivateKey);
 
-        HTLCNative htlc = new HTLCNative{salt: salt}(htlcOwner);
-        console.log("HTLCNative deployed at:", address(htlc));
+        // Same factory as forge's salted `new`, so the prediction matches the deploy.
+        address htlcAddress = vm.computeCreate2Address(
+            salt, keccak256(abi.encodePacked(type(HTLCNative).creationCode, abi.encode(htlcOwner)))
+        );
+        HTLCNative htlc;
+        if (htlcAddress.code.length > 0) {
+            htlc = HTLCNative(htlcAddress);
+            console.log("HTLCNative already deployed at:", htlcAddress);
+        } else {
+            htlc = new HTLCNative{salt: salt}(htlcOwner);
+            console.log("HTLCNative deployed at:", address(htlc));
+        }
         console.log("HTLCNative owner:", htlcOwner);
 
-        HTLCNativeCoordinator coordinator = new HTLCNativeCoordinator{salt: salt}(address(htlc));
-        console.log("HTLCNativeCoordinator deployed at:", address(coordinator));
+        address coordinatorAddress = vm.computeCreate2Address(
+            salt, keccak256(abi.encodePacked(type(HTLCNativeCoordinator).creationCode, abi.encode(address(htlc))))
+        );
+        if (coordinatorAddress.code.length > 0) {
+            console.log("HTLCNativeCoordinator already deployed at:", coordinatorAddress);
+        } else {
+            HTLCNativeCoordinator coordinator = new HTLCNativeCoordinator{salt: salt}(address(htlc));
+            console.log("HTLCNativeCoordinator deployed at:", address(coordinator));
+        }
 
         vm.stopBroadcast();
     }

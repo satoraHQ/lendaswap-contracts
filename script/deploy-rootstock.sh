@@ -14,7 +14,11 @@
 #                              = same address on testnet and mainnet.
 #   HTLC_OWNER               - HTLCNative owner (default: deployer). Mainnet: the key
 #                              that owns HTLCErc20 on the other chains.
-#   ROOTSTOCK_RPC_URL        - override the public node for the chosen network
+#   ROOTSTOCK_RPC_URL        - override the public mainnet node
+#   ROOTSTOCK_TESTNET_RPC_URL - override the public testnet node. Separate from
+#                              ROOTSTOCK_RPC_URL so a mainnet URL in .env cannot
+#                              leak into a testnet run (the chain-id check would
+#                              refuse it, but the run should not need a tweak).
 #
 # Rootstock specifics baked in below:
 #   --legacy       no EIP-1559 (eth_feeHistory is "method not found"), type-0 txs only
@@ -46,7 +50,7 @@ done
 case "$NETWORK" in
   testnet)
     CHAIN_ID=31
-    RPC_URL="${ROOTSTOCK_RPC_URL:-https://public-node.testnet.rsk.co}"
+    RPC_URL="${ROOTSTOCK_TESTNET_RPC_URL:-https://public-node.testnet.rsk.co}"
     VERIFIER_URL="https://rootstock-testnet.blockscout.com/api"
     EXPLORER="https://rootstock-testnet.blockscout.com"
     ;;
@@ -140,8 +144,19 @@ echo "Predicted HTLCNative:            $HTLC_ADDRESS"
 echo "Predicted HTLCNativeCoordinator: $COORD_ADDRESS"
 echo ""
 
+# A contract already at its predicted address is reused by the forge script and
+# only the missing one is deployed, so a run that broke between the two
+# transactions is resumed by running the same command again. Bump DEPLOY_SALT
+# for a fresh pair instead.
+HTLC_EXISTS=false
+COORD_EXISTS=false
 if [ "$(cast code "$HTLC_ADDRESS" --rpc-url "$RPC_URL")" != "0x" ]; then
-  echo "HTLCNative already deployed at $HTLC_ADDRESS (same salt, bytecode and owner). Bump DEPLOY_SALT for a fresh address."
+  HTLC_EXISTS=true
+  echo "HTLCNative already deployed at $HTLC_ADDRESS; reusing it."
+fi
+if [ "$(cast code "$COORD_ADDRESS" --rpc-url "$RPC_URL")" != "0x" ]; then
+  COORD_EXISTS=true
+  echo "HTLCNativeCoordinator already deployed at $COORD_ADDRESS; nothing to deploy."
 fi
 
 if ! $DRY_RUN; then
@@ -154,22 +169,95 @@ fi
 
 # ─── Deploy ──────────────────────────────────────────────────────────────────
 
-FORGE_ARGS=(script/DeployHTLCNative.s.sol --rpc-url "$RPC_URL" --legacy -vvv)
+# --slow: one transaction at a time. RSKj weighs a tx with a pending nonce gap
+# against the sender's tx-pool quota; the second tx of a burst gets rejected with
+# "account exceeds quota" on a fresh account.
+FORGE_ARGS=(script/DeployHTLCNative.s.sol --rpc-url "$RPC_URL" --legacy --slow -vvv)
 if ! $DRY_RUN; then
   FORGE_ARGS+=(--broadcast --verify --verifier blockscout --verifier-url "$VERIFIER_URL")
 fi
 
+# Failures past this point must not skip the summary: a run that broke between
+# the two transactions still needs to tell which contract landed and where.
+FAILED=false
 (cd "$CONTRACTS_DIR" && \
   MNEMONIC="$MNEMONIC" DERIVATION_INDEX="$DERIVATION_INDEX" DEPLOY_SALT="$DEPLOY_SALT" HTLC_OWNER="$HTLC_OWNER" \
-  forge script "${FORGE_ARGS[@]}")
+  forge script "${FORGE_ARGS[@]}") || FAILED=true
+
+is_verified() {
+  local verified
+  verified=$(curl -sf "$VERIFIER_URL/v2/smart-contracts/$1" | jq -r ".is_verified // false" || echo false)
+  [ "$verified" == "true" ]
+}
+
+# forge --verify only covers contracts deployed in this run. A contract that
+# pre-existed (resumed run) is verified here unless Blockscout already has it.
+verify_if_needed() {
+  local address="$1" contract="$2" args="$3"
+  if is_verified "$address"; then
+    echo "$contract at $address is already verified."
+    return
+  fi
+  echo "Verifying $contract at $address..."
+  (cd "$CONTRACTS_DIR" && forge verify-contract "$address" "$contract" \
+    --chain-id "$CHAIN_ID" --verifier blockscout --verifier-url "$VERIFIER_URL" \
+    --constructor-args "$args" --watch) || FAILED=true
+}
+
+if ! $DRY_RUN; then
+  $HTLC_EXISTS && verify_if_needed "$HTLC_ADDRESS" src/HTLCNative.sol:HTLCNative "$HTLC_ARG"
+  $COORD_EXISTS && verify_if_needed "$COORD_ADDRESS" src/HTLCNativeCoordinator.sol:HTLCNativeCoordinator "$COORD_ARG"
+fi
+
+# ─── Summary ─────────────────────────────────────────────────────────────────
+
+# Hash of the deploy tx forge recorded for a contract in this chain's latest
+# broadcast, or empty (never sent, or dry run).
+deploy_tx_hash() {
+  local run="$CONTRACTS_DIR/broadcast/DeployHTLCNative.s.sol/$CHAIN_ID/run-latest.json"
+  [ -f "$run" ] || return 0
+  jq -r --arg name "$1" '[.transactions[] | select(.contractName == $name) | .hash // empty][0] // empty' "$run"
+}
+
+# Live on-chain state, not the script's view: the explorer links are only
+# useful for a contract that actually landed.
+report_contract() {
+  local name="$1" address="$2"
+  echo "  $name"
+  echo "    address:  $EXPLORER/address/$address"
+  if [ "$(cast code "$address" --rpc-url "$RPC_URL")" == "0x" ]; then
+    echo "    deployed: NO"
+    return
+  fi
+  if is_verified "$address"; then
+    echo "    deployed: yes, verified"
+  else
+    echo "    deployed: yes, NOT verified"
+  fi
+  if ! $DRY_RUN; then
+    local hash
+    hash=$(deploy_tx_hash "$name")
+    [ -n "$hash" ] && echo "    tx:       $EXPLORER/tx/$hash"
+  fi
+}
 
 echo ""
 echo "============================================"
-echo "  Rootstock $NETWORK summary"
+if $DRY_RUN; then
+  echo "  Rootstock $NETWORK summary (DRY RUN, nothing broadcast)"
+else
+  echo "  Rootstock $NETWORK summary"
+fi
 echo "============================================"
-echo "  HTLCNative:            $EXPLORER/address/$HTLC_ADDRESS"
-echo "  HTLCNativeCoordinator: $EXPLORER/address/$COORD_ADDRESS"
+report_contract HTLCNative "$HTLC_ADDRESS"
+report_contract HTLCNativeCoordinator "$COORD_ADDRESS"
 echo ""
 echo "Config (lowercase, EIP-1191 chains):"
 echo "  native_htlc_contract:             \"$HTLC_ADDRESS\""
 echo "  native_htlc_coordinator_contract: \"$COORD_ADDRESS\""
+
+if $FAILED; then
+  echo ""
+  echo "Deployment did not complete; see the errors above. Rerunning resumes it."
+  exit 1
+fi
