@@ -34,8 +34,7 @@ Three primary flows:
    HTLC. Uses Permit2 for gasless token approvals.
 2. **redeemAndExecute**: Redeem tokens from an HTLC via EIP-712 signature, run arbitrary calls (e.g., swap WBTC to
    USDC), then sweep the result to the caller.
-3. **refundAndExecute**: Refund an expired HTLC, run arbitrary calls (e.g., swap back to original token), then sweep to
-   the original depositor.
+3. **refundTo**: Refund an expired HTLC straight to the original depositor.
 
 ### Key Parameters
 

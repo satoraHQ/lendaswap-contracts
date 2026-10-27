@@ -11,8 +11,8 @@ import {HTLCNative, SwapKey} from "./HTLCNative.sol";
 ///      `amount` of the native coin in an HTLC with the coordinator as sender.
 ///   2. redeemAndExecute – redeem the coin from an HTLC via the claimant's EIP-712
 ///      signature, run arbitrary calls, then sweep the result to the signed destination.
-///   3. refundAndExecute / refundTo – refund an expired HTLC created via this coordinator
-///      to the original depositor, optionally through arbitrary calls.
+///   3. refundTo – refund an expired HTLC created via this coordinator straight to the
+///      original depositor.
 ///   The coordinator holds no long-lived funds and has no owner. Any balance that lands
 ///   here outside a flow (`receive`) is swept to the next redeemer's destination, and can
 ///   never become part of a lock.
@@ -27,8 +27,6 @@ contract HTLCNativeCoordinator is CallExecutor {
 
     /// @dev No deposit is recorded for this HTLC key.
     error UnknownHtlc();
-    /// @dev msg.sender is not the recorded depositor.
-    error Unauthorized();
     /// @dev The calls spent balance that was not part of `msg.value`.
     error CallsOverspent();
 
@@ -39,7 +37,7 @@ contract HTLCNativeCoordinator is CallExecutor {
     // -- Storage --
 
     /// @dev Maps HTLC swap key -> original depositor address.
-    ///      Populated by executeAndCreate, used by refundAndExecute / refundTo.
+    ///      Populated by executeAndCreate, used by refundTo.
     mapping(SwapKey => address) public deposits;
 
     // -- Constructor --
@@ -62,8 +60,7 @@ contract HTLCNativeCoordinator is CallExecutor {
     ///      a token sent here ahead of a call is a stray anyone can sweep, so ERC20
     ///      input is not supported (an atomic smart-account batch is the caller's
     ///      concern, not this contract's).
-    ///      If the swap expires, only the depositor can call refundAndExecute; refundTo
-    ///      is permissionless but always pays the depositor.
+    ///      If the swap expires, refundTo is permissionless but always pays the depositor.
     /// @param calls        Arbitrary calls to execute before the lock
     /// @param preimageHash SHA-256 preimage hash for the HTLC
     /// @param amount       Exact amount of the native coin to lock
@@ -148,44 +145,6 @@ contract HTLCNativeCoordinator is CallExecutor {
 
         _executeCalls(calls);
         _sweep(destination, sweepToken, minAmountOut);
-    }
-
-    /// @notice Refund an expired HTLC created via this coordinator, execute arbitrary
-    ///         calls, then sweep to the original depositor
-    /// @dev Restricted to the original depositor: the calls run with the coordinator as
-    ///      msg.sender, so only the party whose funds are at stake may choose them.
-    ///      This is the escape hatch for a depositor that cannot receive the native
-    ///      coin (wrap it, sweep the ERC20). For a permissionless refund use refundTo.
-    /// @param preimageHash The preimage hash used at HTLC creation
-    /// @param amount       Amount locked in the HTLC
-    /// @param claimAddress Claim address set at HTLC creation
-    /// @param timelock     Timelock set at HTLC creation
-    /// @param calls        Arbitrary calls to execute after refund
-    /// @param sweepToken   Token to sweep to the depositor (address(0) for the native coin)
-    /// @param minAmountOut Minimum balance required before sweeping
-    function refundAndExecute(
-        bytes32 preimageHash,
-        uint256 amount,
-        address claimAddress,
-        uint256 timelock,
-        Call[] calldata calls,
-        address sweepToken,
-        uint256 minAmountOut
-    ) external nonReentrant {
-        SwapKey key = HTLC_NATIVE.computeKey(preimageHash, amount, address(0), address(this), claimAddress, timelock);
-        address depositor = deposits[key];
-        if (depositor == address(0)) revert UnknownHtlc();
-        if (msg.sender != depositor) revert Unauthorized();
-
-        delete deposits[key];
-
-        HTLC_NATIVE.refund(preimageHash, amount, claimAddress, timelock);
-
-        if (calls.length > 0) {
-            _executeCalls(calls);
-        }
-
-        _sweep(depositor, sweepToken, minAmountOut);
     }
 
     /// @notice Refund an expired coordinator-created HTLC straight to the original depositor

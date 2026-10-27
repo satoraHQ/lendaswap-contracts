@@ -168,54 +168,6 @@ contract HTLCCoordinatorCreateAndClaimTest is Test {
         assertEq(wbtc.balanceOf(address(htlc)), expectedWbtc, "htlc should still hold 1 WBTC");
     }
 
-    function test_executeAndCreate_withRefundCalls_thenRefund() public {
-        // 1. Build the refund calls that swap WBTC back to USDC
-        HTLCCoordinator.Call[] memory refundCalls = new HTLCCoordinator.Call[](2);
-        refundCalls[0] = HTLCCoordinator.Call({
-            target: address(wbtc),
-            value: 0,
-            callData: abi.encodeCall(IERC20.approve, (address(dex), expectedWbtc))
-        });
-        refundCalls[1] = HTLCCoordinator.Call({
-            target: address(dex),
-            value: 0,
-            callData: abi.encodeWithSignature(
-                "swap(address,address,uint256,uint256)",
-                address(wbtc), address(usdc), expectedWbtc, usdcAmount
-            )
-        });
-
-        // 2. Alice creates the swap via Permit2
-        HTLCCoordinator.Call[] memory createCalls = _buildSwapCalls(
-            address(usdc), address(wbtc), usdcAmount, expectedWbtc
-        );
-
-        (ISignatureTransfer.PermitTransferFrom memory permit, bytes memory signature) =
-            _signPermit2(address(usdc), usdcAmount, 0, address(coordinator), createCalls);
-
-        vm.prank(alice);
-        coordinator.executeAndCreateWithPermit2(
-            createCalls, preimageHash, address(wbtc), bob, timelock, alice, permit, signature
-        );
-
-        uint256 aliceUsdcBefore = usdc.balanceOf(alice);
-        assertEq(wbtc.balanceOf(address(htlc)), expectedWbtc, "htlc should hold 1 WBTC");
-
-        // 3. Bob never claims — timelock expires
-        vm.warp(timelock + 1);
-
-        // 4. Depositor triggers the refund — swap WBTC back to USDC
-        vm.prank(alice);
-        coordinator.refundAndExecute(
-            preimageHash, expectedWbtc, address(wbtc), bob, timelock,
-            refundCalls, address(usdc), usdcAmount
-        );
-
-        // Verify: HTLC is empty, Alice got her USDC back
-        assertEq(wbtc.balanceOf(address(htlc)), 0, "htlc should be empty");
-        assertEq(usdc.balanceOf(alice), aliceUsdcBefore + usdcAmount, "alice should have her USDC back");
-    }
-
     function test_executeAndCreate_thenRefundTo_wbtc() public {
         // 1. Alice creates the swap via Permit2 (no refund calls — she'll take the WBTC directly)
         HTLCCoordinator.Call[] memory calls = _buildSwapCalls(

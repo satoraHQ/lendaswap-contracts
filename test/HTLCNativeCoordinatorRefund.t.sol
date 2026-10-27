@@ -6,8 +6,9 @@ import {HTLCNative} from "../src/HTLCNative.sol";
 import {HTLCNativeCoordinator} from "../src/HTLCNativeCoordinator.sol";
 import {CallExecutor} from "../src/CallExecutor.sol";
 
-/// @notice A depositor contract with no receive hook: refundTo cannot pay it, but a
-///         wrap-then-sweep refundAndExecute can.
+/// @notice A depositor contract with no receive hook. refundTo cannot pay it: the
+///         coordinator has no refund path that runs calls, so such a depositor must
+///         not lock through it.
 contract NonReceivingDepositor {
     HTLCNativeCoordinator immutable c;
 
@@ -20,16 +21,6 @@ contract NonReceivingDepositor {
         c.executeAndCreate{value: msg.value}(calls, h, amount, claim, tl);
     }
 
-    function refundWrapped(
-        bytes32 h,
-        uint256 amount,
-        address claim,
-        uint256 tl,
-        CallExecutor.Call[] calldata calls,
-        address token
-    ) external {
-        c.refundAndExecute(h, amount, claim, tl, calls, token, amount);
-    }
 }
 
 contract HTLCNativeCoordinatorRefundTest is NativeCoordinatorFixture {
@@ -71,44 +62,6 @@ contract HTLCNativeCoordinatorRefundTest is NativeCoordinatorFixture {
         coordinator.refundTo(preimageHash, amount, bob, timelock);
     }
 
-    function test_refundAndExecute_byDepositor_plain() public {
-        vm.warp(timelock);
-        vm.prank(alice);
-        coordinator.refundAndExecute(preimageHash, amount, bob, timelock, noCalls, address(0), amount);
-        assertEq(alice.balance, 10 ether, "alice made whole");
-        assertEq(coordinator.deposits(_key(amount)), address(0), "deposit cleared");
-    }
-
-    function test_refundAndExecute_byDepositor_wrapThenSweep() public {
-        vm.warp(timelock);
-        CallExecutor.Call[] memory calls = _one(_wrapCall(amount));
-        vm.prank(alice);
-        coordinator.refundAndExecute(preimageHash, amount, bob, timelock, calls, address(wrbtc), amount);
-        assertEq(wrbtc.balanceOf(alice), amount, "alice received WRBTC");
-        assertEq(alice.balance, 10 ether - amount, "no native paid");
-    }
-
-    function test_refundAndExecute_byStranger_reverts() public {
-        vm.warp(timelock);
-        vm.prank(stranger);
-        vm.expectRevert(HTLCNativeCoordinator.Unauthorized.selector);
-        coordinator.refundAndExecute(preimageHash, amount, bob, timelock, noCalls, address(0), 0);
-    }
-
-    function test_refundAndExecute_unknownKey_reverts() public {
-        vm.warp(timelock);
-        vm.prank(alice);
-        vm.expectRevert(HTLCNativeCoordinator.UnknownHtlc.selector);
-        coordinator.refundAndExecute(preimageHash, amount + 1, bob, timelock, noCalls, address(0), 0);
-    }
-
-    function test_refundAndExecute_minAmountOutBreach_reverts() public {
-        vm.warp(timelock);
-        vm.prank(alice);
-        vm.expectRevert(CallExecutor.InsufficientBalance.selector);
-        coordinator.refundAndExecute(preimageHash, amount, bob, timelock, noCalls, address(0), amount + 1);
-    }
-
     function test_refundAfterRedeem_reverts() public {
         _redeemVia(noCalls, address(0), amount, bob);
         vm.warp(timelock);
@@ -116,9 +69,6 @@ contract HTLCNativeCoordinatorRefundTest is NativeCoordinatorFixture {
         // the refund before the HTLC would (SwapNotActive).
         vm.expectRevert(HTLCNativeCoordinator.UnknownHtlc.selector);
         coordinator.refundTo(preimageHash, amount, bob, timelock);
-        vm.prank(alice);
-        vm.expectRevert(HTLCNativeCoordinator.UnknownHtlc.selector);
-        coordinator.refundAndExecute(preimageHash, amount, bob, timelock, noCalls, address(0), 0);
     }
 
     function test_redeemAfterRefund_reverts() public {
@@ -135,7 +85,7 @@ contract HTLCNativeCoordinatorRefundTest is NativeCoordinatorFixture {
         );
     }
 
-    function test_nonReceivableDepositor_refundToReverts_wrapPathWorks() public {
+    function test_nonReceivableDepositor_refundToReverts() public {
         NonReceivingDepositor nr = new NonReceivingDepositor(coordinator);
         vm.deal(address(nr), 2 ether);
         bytes32 h2 = sha256(abi.encodePacked(bytes32(uint256(0xcafe))));
@@ -145,9 +95,5 @@ contract HTLCNativeCoordinatorRefundTest is NativeCoordinatorFixture {
         vm.prank(stranger);
         vm.expectRevert(HTLCNative.EtherTransferFailed.selector);
         coordinator.refundTo(h2, amount, bob, timelock);
-
-        CallExecutor.Call[] memory calls = _one(_wrapCall(amount));
-        nr.refundWrapped(h2, amount, bob, timelock, calls, address(wrbtc));
-        assertEq(wrbtc.balanceOf(address(nr)), amount, "depositor refunded as WRBTC");
     }
 }

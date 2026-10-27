@@ -1,17 +1,15 @@
-//! E2E tests for the 4 core HTLCCoordinator flows using **local Anvil + mock
+//! E2E tests for the 3 core HTLCCoordinator flows using **local Anvil + mock
 //! contracts** (MockUSDC, MockWBTC, MockDEX). No network access required.
 //!
 //! Tests 1 and 2 overlap with `e2e_swap_then_lock_then_redeem` (which uses a
 //! real Polygon fork + Uniswap V3). They are kept here so the full coordinator
 //! lifecycle can be validated locally without RPC credentials.
-//! Tests 3 and 4 (refund paths) are unique to this file.
+//! Test 3 (the refund path) is unique to this file.
 //!
 //! 1. `test_lock_and_execute`    — `executeAndCreateWithPermit2`: swap USDC→WBTC via DEX, lock WBTC
 //!    in HTLC
 //! 2. `test_claim`               — Bob redeems the HTLC with the preimage
-//! 3. `test_refund_and_execute`  — `refundAndExecute`: after timelock, depositor swaps WBTC back to
-//!    USDC
-//! 4. `test_refund_to`           — `refundTo`: after timelock, anyone sends WBTC directly to
+//! 3. `test_refund_to`           — `refundTo`: after timelock, anyone sends WBTC directly to
 //!    depositor
 //!
 //! Run:
@@ -232,42 +230,6 @@ async fn sign_permit2(
 
     Ok((permit, signature))
 }
-
-/// Build the refund calls for refundAndExecute:
-///   1. approve(dex, WBTC)
-///   2. dex.swap(WBTC → USDC)
-fn build_refund_calls(wbtc: Address, usdc: Address, dex: Address) -> Vec<HTLCCoordinator::Call> {
-    vec![
-        HTLCCoordinator::Call {
-            target: wbtc,
-            value: U256::ZERO,
-            callData: Bytes::from(
-                IERC20::approveCall {
-                    spender: dex,
-                    amount: U256::from(EXPECTED_WBTC),
-                }
-                .abi_encode(),
-            ),
-        },
-        HTLCCoordinator::Call {
-            target: dex,
-            value: U256::ZERO,
-            callData: Bytes::from(
-                MockDEX::swapCall {
-                    tokenIn: wbtc,
-                    tokenOut: usdc,
-                    amountIn: U256::from(EXPECTED_WBTC),
-                    minAmountOut: U256::from(USDC_AMOUNT),
-                }
-                .abi_encode(),
-            ),
-        },
-    ]
-}
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 /// 1. Lock and execute: swap USDC → WBTC via DEX and lock WBTC in HTLC
 #[tokio::test]
@@ -696,241 +658,7 @@ async fn test_claim() -> Result<()> {
     Ok(())
 }
 
-/// 3. Refund and execute: after timelock, swap WBTC back to USDC for Alice
-#[tokio::test]
-async fn test_refund_and_execute() -> Result<()> {
-    println!("\n=== test_refund_and_execute ===\n");
-
-    // -- 1. Setup --
-    println!("1. Spawning Anvil and creating wallets ...");
-    let anvil = Anvil::new().block_time(1).try_spawn()?;
-    let endpoint = anvil.endpoint_url();
-
-    let deployer_key: PrivateKeySigner = anvil.keys()[0].clone().into();
-    let alice_key: PrivateKeySigner = anvil.keys()[1].clone().into();
-    let bob_key: PrivateKeySigner = anvil.keys()[2].clone().into();
-    let alice_address = alice_key.address();
-    let bob_address = bob_key.address();
-
-    let deployer_provider = ProviderBuilder::new()
-        .wallet(EthereumWallet::from(deployer_key))
-        .connect_http(endpoint.clone());
-    let alice_provider = ProviderBuilder::new()
-        .wallet(EthereumWallet::from(alice_key.clone()))
-        .connect_http(endpoint.clone());
-
-    let raw_provider = ProviderBuilder::new().connect_http(endpoint.clone());
-
-    println!("   Alice: {alice_address}");
-    println!("   Bob:   {bob_address}");
-
-    // -- 2. Deploy contracts (with Permit2) --
-    println!("\n2. Deploying contracts ...");
-    let htlc = HTLCErc20::deploy(
-        &deployer_provider,
-        deployer_provider.default_signer_address(),
-    )
-    .await?;
-    raw_provider
-        .raw_request::<_, ()>(
-            "anvil_setCode".into(),
-            &[
-                format!("{PERMIT2_ADDRESS:?}"),
-                PERMIT2_RUNTIME_CODE.to_string(),
-            ],
-        )
-        .await?;
-    let coordinator =
-        HTLCCoordinator::deploy(&deployer_provider, *htlc.address(), PERMIT2_ADDRESS).await?;
-    let usdc = MockUSDC::deploy(&deployer_provider).await?;
-    let wbtc = MockWBTC::deploy(&deployer_provider).await?;
-    let dex = MockDEX::deploy(&deployer_provider).await?;
-    println!("   HTLCErc20:       {}", htlc.address());
-    println!("   HTLCCoordinator: {}", coordinator.address());
-
-    // -- 3. Fund Alice and DEX --
-    println!("\n3. Funding Alice with 100k USDC, DEX with 50 WBTC + 500k USDC ...");
-    IERC20::new(*usdc.address(), &deployer_provider)
-        .transfer(alice_address, U256::from(100_000_000_000u128))
-        .send()
-        .await?
-        .get_receipt()
-        .await?;
-    IERC20::new(*wbtc.address(), &deployer_provider)
-        .transfer(*dex.address(), U256::from(5_000_000_000u128))
-        .send()
-        .await?
-        .get_receipt()
-        .await?;
-    IERC20::new(*usdc.address(), &deployer_provider)
-        .transfer(*dex.address(), U256::from(500_000_000_000u128))
-        .send()
-        .await?
-        .get_receipt()
-        .await?;
-    dex.setRate(
-        *usdc.address(),
-        *wbtc.address(),
-        U256::from(EXPECTED_WBTC),
-        U256::from(USDC_AMOUNT),
-    )
-    .send()
-    .await?
-    .get_receipt()
-    .await?;
-    dex.setRate(
-        *wbtc.address(),
-        *usdc.address(),
-        U256::from(USDC_AMOUNT),
-        U256::from(EXPECTED_WBTC),
-    )
-    .send()
-    .await?
-    .get_receipt()
-    .await?;
-    println!("   DEX rate: 60,000 USDC = 1 WBTC (both directions)");
-
-    // -- 4. Alice creates swap via executeAndCreateWithPermit2 --
-    println!("\n4. Alice creating swap via executeAndCreateWithPermit2 ...");
-    let preimage = FixedBytes::<32>::from([0xABu8; 32]);
-    let preimage_hash = FixedBytes::<32>::from_slice(&Sha256::digest(preimage.as_slice()));
-    let block_num = raw_provider.get_block_number().await?;
-    let block = raw_provider
-        .get_block_by_number(block_num.into())
-        .await?
-        .unwrap();
-    let timelock_ts = block.header.timestamp + 3600;
-    let timelock = U256::from(timelock_ts);
-    println!("   Preimage hash: {preimage_hash}");
-    println!("   Timelock:      {timelock}");
-
-    IERC20::new(*usdc.address(), &alice_provider)
-        .approve(PERMIT2_ADDRESS, U256::MAX)
-        .send()
-        .await?
-        .get_receipt()
-        .await?;
-
-    let forward_calls = build_forward_calls(*usdc.address(), *wbtc.address(), *dex.address());
-
-    let (permit, signature) = sign_permit2(
-        &raw_provider,
-        *coordinator.address(),
-        &alice_key,
-        *usdc.address(),
-        U256::from(USDC_AMOUNT),
-        preimage_hash,
-        *wbtc.address(),
-        bob_address,
-        timelock,
-        &forward_calls,
-    )
-    .await?;
-
-    let create_receipt = HTLCCoordinator::new(*coordinator.address(), &alice_provider)
-        .executeAndCreateWithPermit2(
-            forward_calls,
-            preimage_hash,
-            *wbtc.address(),
-            bob_address,
-            timelock,
-            alice_address,
-            permit,
-            signature,
-        )
-        .send()
-        .await?
-        .get_receipt()
-        .await?;
-    println!(
-        "   tx: {:?}  status: {:?}",
-        create_receipt.transaction_hash,
-        create_receipt.status()
-    );
-
-    let alice_usdc_before = IERC20::new(*usdc.address(), &alice_provider)
-        .balanceOf(alice_address)
-        .call()
-        .await?;
-    let wbtc_locked = IERC20::new(*wbtc.address(), &alice_provider)
-        .balanceOf(*htlc.address())
-        .call()
-        .await?;
-    println!("   WBTC locked in HTLC: {wbtc_locked}");
-    println!("   Alice USDC remaining: {alice_usdc_before}");
-
-    // -- 5. Advance time past timelock (Bob never claims) --
-    println!("\n5. Advancing time past timelock (Bob never claims) ...");
-    raw_provider
-        .raw_request::<_, serde_json::Value>(
-            "evm_setNextBlockTimestamp".into(),
-            vec![timelock_ts + 1],
-        )
-        .await?;
-    raw_provider
-        .raw_request::<_, serde_json::Value>("evm_mine".into(), Vec::<u64>::new())
-        .await?;
-    println!(
-        "   Block timestamp set to {} (timelock + 1)",
-        timelock_ts + 1
-    );
-
-    // -- 6. Alice triggers refundAndExecute (swap WBTC back to USDC) --
-    println!("\n6. Alice calling refundAndExecute (approve DEX + swap WBTC→USDC) ...");
-    let refund_calls = build_refund_calls(*wbtc.address(), *usdc.address(), *dex.address());
-
-    let coordinator_alice = HTLCCoordinator::new(*coordinator.address(), &alice_provider);
-    let receipt = coordinator_alice
-        .refundAndExecute(
-            preimage_hash,
-            U256::from(EXPECTED_WBTC),
-            *wbtc.address(),
-            bob_address,
-            timelock,
-            refund_calls,
-            *usdc.address(),
-            U256::from(USDC_AMOUNT),
-        )
-        .send()
-        .await?
-        .get_receipt()
-        .await?;
-    println!(
-        "   tx: {:?}  status: {:?}",
-        receipt.transaction_hash,
-        receipt.status()
-    );
-    assert!(receipt.status(), "refundAndExecute should succeed");
-
-    // -- 7. Verify --
-    println!("\n7. Verifying ...");
-
-    let htlc_balance = IERC20::new(*wbtc.address(), &alice_provider)
-        .balanceOf(*htlc.address())
-        .call()
-        .await?;
-    println!("   HTLC WBTC balance: {htlc_balance}");
-    assert_eq!(htlc_balance, U256::ZERO, "HTLC should be empty");
-
-    let alice_usdc_after = IERC20::new(*usdc.address(), &alice_provider)
-        .balanceOf(alice_address)
-        .call()
-        .await?;
-    println!(
-        "   Alice USDC: {alice_usdc_before} -> {alice_usdc_after} (+{})",
-        alice_usdc_after - alice_usdc_before
-    );
-    assert_eq!(
-        alice_usdc_after - alice_usdc_before,
-        U256::from(USDC_AMOUNT),
-        "Alice should have her USDC back"
-    );
-
-    println!("\n=== test_refund_and_execute PASSED ===\n");
-    Ok(())
-}
-
-/// 4. Refund the WBTC: after timelock, send WBTC directly to Alice
+/// 3. Refund the WBTC: after timelock, send WBTC directly to Alice
 #[tokio::test]
 async fn test_refund_to() -> Result<()> {
     let anvil = Anvil::new().block_time(1).try_spawn()?;
