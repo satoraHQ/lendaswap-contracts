@@ -47,8 +47,8 @@ DERIVATION_INDEX="${DERIVATION_INDEX:-0}"
 
 # ─── Chain definitions (parallel arrays, bash 3.2 compatible) ────────────────
 # CHAIN_FAMILIES names the HTLC pair a chain runs: "erc20" (HTLCErc20 +
-# HTLCCoordinator, deployed by deploy-multichain.sh) or "native" (HTLCNative +
-# HTLCNativeCoordinator for the chain's own coin, deployed by
+# HTLCCoordinator, deployed by deploy-multichain.sh) or "native" (HTLCNative
+# for the chain's own coin, deployed by
 # deploy-rootstock.sh with legacy transactions). The ERC20 deploy and gas
 # scripts skip native chains; balances cover every chain.
 #           index:   0            1              2            3

@@ -36,6 +36,25 @@ Three primary flows:
    USDC), then sweep the result to the caller.
 3. **refundTo**: Refund an expired HTLC straight to the original depositor.
 
+### HTLCNative on Rootstock
+
+New RBTC swaps use `HTLCNative` directly. A source wallet funds `create` and
+retains the refund right. For an RBTC payout, the swap's derived claim key signs
+`redeemBySig`, and the payout wallet submits it and pays gas. The deployed HTLC
+pays `msg.sender`, so the SDK requires the submitting wallet to match the payout
+address. No coordinator or backend claim relay is involved.
+
+When RIF Relay is configured, the recipient signs a claim through their smart
+wallet and the relay fee comes out of the claimed RBTC. Without RIF Relay, users
+need RBTC for claim gas. Quotes include the server's funding gas, without the
+former server-relayed client claim allowance. The existing HTLC deployment can
+be reused; `DeployHTLCNative.s.sol` deploys only the HTLC. Configure
+`native_htlc_contract` and `native_htlc_version` without a coordinator.
+
+Native coordinator code and refund helpers remain for already-funded legacy
+swaps. Their pinned on-chain sender continues to determine how they settle.
+Ethereum, Arbitrum, and Polygon retain their existing coordinator and gasless flows.
+
 ### Key Parameters
 
 - `preimageHash`: SHA-256 hash of the secret (compatible with Bitcoin HTLC scripts)

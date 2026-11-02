@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Deploy HTLCNative + HTLCNativeCoordinator to Rootstock via CREATE2.
+# Deploy HTLCNative to Rootstock via CREATE2.
 #
 # Usage:
 #   ./deploy-rootstock.sh testnet [--dry-run]   # chain 31, https://public-node.testnet.rsk.co
@@ -136,27 +136,14 @@ HTLC_BYTECODE=$(jq -r '.bytecode.object' "$CONTRACTS_DIR/out/HTLCNative.sol/HTLC
 HTLC_ARG=$(cast abi-encode "constructor(address)" "$HTLC_OWNER")
 HTLC_ADDRESS=$(compute_create2_address "$CREATE2_FACTORY" "$DEPLOY_SALT" "$(cast keccak "${HTLC_BYTECODE}${HTLC_ARG#0x}")")
 
-COORD_BYTECODE=$(jq -r '.bytecode.object' "$CONTRACTS_DIR/out/HTLCNativeCoordinator.sol/HTLCNativeCoordinator.json")
-COORD_ARG=$(cast abi-encode "constructor(address)" "$HTLC_ADDRESS")
-COORD_ADDRESS=$(compute_create2_address "$CREATE2_FACTORY" "$DEPLOY_SALT" "$(cast keccak "${COORD_BYTECODE}${COORD_ARG#0x}")")
-
 echo "Predicted HTLCNative:            $HTLC_ADDRESS"
-echo "Predicted HTLCNativeCoordinator: $COORD_ADDRESS"
 echo ""
 
-# A contract already at its predicted address is reused by the forge script and
-# only the missing one is deployed, so a run that broke between the two
-# transactions is resumed by running the same command again. Bump DEPLOY_SALT
-# for a fresh pair instead.
+# Reuse the deployed HTLC; change DEPLOY_SALT for a fresh deployment.
 HTLC_EXISTS=false
-COORD_EXISTS=false
 if [ "$(cast code "$HTLC_ADDRESS" --rpc-url "$RPC_URL")" != "0x" ]; then
   HTLC_EXISTS=true
   echo "HTLCNative already deployed at $HTLC_ADDRESS; reusing it."
-fi
-if [ "$(cast code "$COORD_ADDRESS" --rpc-url "$RPC_URL")" != "0x" ]; then
-  COORD_EXISTS=true
-  echo "HTLCNativeCoordinator already deployed at $COORD_ADDRESS; nothing to deploy."
 fi
 
 if ! $DRY_RUN; then
@@ -177,8 +164,7 @@ if ! $DRY_RUN; then
   FORGE_ARGS+=(--broadcast --verify --verifier blockscout --verifier-url "$VERIFIER_URL")
 fi
 
-# Failures past this point must not skip the summary: a run that broke between
-# the two transactions still needs to tell which contract landed and where.
+# Report the deployed address even when verification failed.
 FAILED=false
 (cd "$CONTRACTS_DIR" && \
   MNEMONIC="$MNEMONIC" DERIVATION_INDEX="$DERIVATION_INDEX" DEPLOY_SALT="$DEPLOY_SALT" HTLC_OWNER="$HTLC_OWNER" \
@@ -206,7 +192,6 @@ verify_if_needed() {
 
 if ! $DRY_RUN; then
   $HTLC_EXISTS && verify_if_needed "$HTLC_ADDRESS" src/HTLCNative.sol:HTLCNative "$HTLC_ARG"
-  $COORD_EXISTS && verify_if_needed "$COORD_ADDRESS" src/HTLCNativeCoordinator.sol:HTLCNativeCoordinator "$COORD_ARG"
 fi
 
 # ─── Summary ─────────────────────────────────────────────────────────────────
@@ -250,11 +235,9 @@ else
 fi
 echo "============================================"
 report_contract HTLCNative "$HTLC_ADDRESS"
-report_contract HTLCNativeCoordinator "$COORD_ADDRESS"
 echo ""
 echo "Config (lowercase, EIP-1191 chains):"
 echo "  native_htlc_contract:             \"$HTLC_ADDRESS\""
-echo "  native_htlc_coordinator_contract: \"$COORD_ADDRESS\""
 
 if $FAILED; then
   echo ""

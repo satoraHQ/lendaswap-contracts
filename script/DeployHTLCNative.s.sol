@@ -3,16 +3,13 @@ pragma solidity ^0.8.24;
 
 import {Script, console} from "forge-std/Script.sol";
 import {HTLCNative} from "../src/HTLCNative.sol";
-import {HTLCNativeCoordinator} from "../src/HTLCNativeCoordinator.sol";
 
-/// @notice Deploys the native-coin HTLC pair. Same key derivation, CREATE2 salt and
+/// @notice Deploys the native-coin HTLC. Same key derivation, CREATE2 salt and
 ///         owner handling as DeployHTLCCoordinator.s.sol; see deploy-rootstock.sh for
 ///         the Rootstock-specific forge flags (legacy transactions, Blockscout).
 ///
 ///         Idempotent: a contract whose CREATE2 address already holds code is reused
-///         instead of redeployed, so a run that broke between the two deployments
-///         (Rootstock's per-account tx-pool quota rejects the second tx of a burst)
-///         is resumed by running the same command again.
+///         instead of redeployed. Clients fund and claim directly on this contract.
 contract DeployHTLCNative is Script {
     function run() external {
         uint256 deployerPrivateKey;
@@ -47,16 +44,6 @@ contract DeployHTLCNative is Script {
             console.log("HTLCNative deployed at:", address(htlc));
         }
         console.log("HTLCNative owner:", htlcOwner);
-
-        address coordinatorAddress = vm.computeCreate2Address(
-            salt, keccak256(abi.encodePacked(type(HTLCNativeCoordinator).creationCode, abi.encode(address(htlc))))
-        );
-        if (coordinatorAddress.code.length > 0) {
-            console.log("HTLCNativeCoordinator already deployed at:", coordinatorAddress);
-        } else {
-            HTLCNativeCoordinator coordinator = new HTLCNativeCoordinator{salt: salt}(address(htlc));
-            console.log("HTLCNativeCoordinator deployed at:", address(coordinator));
-        }
 
         vm.stopBroadcast();
     }
