@@ -63,6 +63,78 @@ Ethereum, Arbitrum, and Polygon retain their existing coordinator and gasless fl
 - `claimAddress`: Address authorized to redeem (prevents front-running)
 - `refundAddress`: Address that can reclaim after timelock
 
+## USDT payouts to Tron
+
+Bitcoin, Lightning and Arkade can pay out native TRC-20 USDT through the
+Arbitrum Legacy Mesh pool. Tron is a destination only. The HTLC and DEX leg
+remain on Arbitrum; no Tron wallet key or Tron HTLC is required.
+
+This route uses `TronBridgeAdapter`, separately from `USDT0BridgeAdapter`:
+
+- Source token: Arbitrum USDT0, `0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9`.
+- Mesh pool: `0x77652D5aba086137b595875263FC200182919B92`.
+- Tron endpoint: `30420`; destination token: `TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t`.
+- Token fee: 3 bps today, set by `contracts.arbitrum.tron_bridge.mesh_fee_bps`.
+  Quotes gross up target-pinned requests and deduct the fee from source-pinned
+  requests. Each claim passes the least amount that must arrive on Tron (the
+  DEX slippage floor less the mesh fee) to `bridgeBalance`, bound into the signed
+  calls; the adapter and the mesh revert below it. A changed mesh fee needs a
+  config update only, no redeploy.
+- Native messaging fees are quoted live, converted to sats, and charged with
+  network fees. Tron has no hardcoded fee fallback. Buffered claim funding
+  left in the adapter is withdrawable by its owner, as are tokens sent to it
+  by mistake (`rescueToken`).
+
+Verify addresses against the [deployment registry](https://docs.usdt0.to/api/deployments)
+and read the [Legacy Mesh integration guidance](https://docs.usdt0.to/technical-documentation/developer/).
+Mesh upgrades can migrate pool addresses. Before enabling this route, simulate
+the deployment script against the intended Arbitrum RPC, deploy it, and set
+`contracts.arbitrum.tron_bridge.adapter` in the daemon config to the resulting
+address. Restart the daemon after changing it. Without it, Tron is disabled.
+Before first use the daemon checks that the address holds code with
+`TRON_EID() == 30420`, `mesh()` = the mesh pool and `token()` = Arbitrum USDT0;
+any mismatch keeps Tron disabled and logs an error.
+
+Opt-in source-side integration test, using only a local fork:
+
+```bash
+TRON_BRIDGE_FORK_RPC=https://arb1.arbitrum.io/rpc \
+  forge test --match-contract TronBridgeForkTest -vv
+```
+
+The TypeScript SDK accepts `Asset.USDT_TRON` with a checksummed `T…` recipient:
+
+```ts
+await client.createSwap({
+  source: Asset.BTC_LIGHTNING,
+  target: Asset.USDT_TRON,
+  sourceAmount: 100_000,
+  targetAddress: recipientTronAddress,
+});
+```
+
+Raw API clients select Arbitrum USDT0 and `bridge_target_chain: "Tron"` when
+creating the swap. `target_address` must be a valid Tron Base58Check address;
+`claiming_address` remains the EVM claim key. Pass the Tron address as
+`bridge_recipient` to both redeem-calldata and gasless-claim endpoints; their
+`destination` stays an EVM address. The signature's calls hash commits to the
+actual Tron recipient. The SDK pins it for auto-claim and restores it from
+server metadata after recovery.
+
+An EVM claim, DEX swap and source bridge send execute in one transaction.
+Tron delivery is asynchronous and depends on the mesh's destination liquidity
+and messaging infrastructure. The source receipt is **not** proof of payout.
+`BridgeInitiated` records the message GUID; the UI tracks the matching Tron
+message through LayerZero Scan and links to Tronscan. On delays or tracking
+errors, retain the original source tx/GUID and resume tracking it. Do not send
+a replacement payout merely because tracking timed out. Destination execution
+recovery follows LayerZero/USDT0 procedures; there is no automatic reverse
+bridge or Tron-side refund implemented here.
+
+Before production rollout, verify a small real transfer through destination
+delivery and the recovery procedure. The fork test verifies the source send
+only and never broadcasts a live transaction.
+
 ## Prerequisites
 
 - [Foundry](https://book.getfoundry.sh/getting-started/installation) installed
@@ -170,6 +242,7 @@ Tokens:
 
 - HTLCErc20 (v6): [`0xf12A26a6CEfc1F5a0772fAf09F94c5e5662a3948`](https://arbiscan.io/address/0xf12A26a6CEfc1F5a0772fAf09F94c5e5662a3948)
 - HTLCCoordinator: [`0xdb76F29f1d04D1202f56a34549869b070DFcBfF0`](https://arbiscan.io/address/0xdb76F29f1d04D1202f56a34549869b070DFcBfF0)
+- TronBridgeAdapter: [`0x5f6050f1a45566c802d58dA1c1124Df48bBbC444`](https://arbiscan.io/address/0x5f6050f1a45566c802d58dA1c1124Df48bBbC444)
 
 Tokens:
 
