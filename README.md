@@ -36,7 +36,7 @@ Two flows:
    USDC), then sweep the result to the signed destination.
 
 There is no refund flow on the coordinator (v5+). The depositor is the HTLC sender, so refund, collaborative refund
-(`refundBySig`) and rehash are the depositor's own calls on the HTLC. The deployed v4 coordinator still has `refundTo`
+(`refundBySig`) and rehash are the depositor's own calls on the HTLC. The legacy v4 coordinator still has `refundTo`
 and `collabRefundAndExecute` for the swaps it created.
 
 ### HTLCNative on Rootstock
@@ -215,19 +215,17 @@ See [`tests/tests/e2e_permit2_swap_lock_then_claim.rs`](tests/tests/e2e_permit2_
 
 ## Contract Addresses
 
-Current deployment: **HTLCErc20 v6** (terminal swap state in storage, full
-typed errors; EIP-712 domain version `"6"`) with **HTLCCoordinator v4** (domain
-version `"4"`, `CallFailed(index)` and friends). Deployed via CREATE2, so the
-addresses are identical on every chain. Note: on this deployment `refundBySig`
-is stubbed (`Unimplemented()`), so collaborative refunds are unavailable;
-timeout refunds work.
+Current deployment: **HTLCErc20 v7 / HTLCCoordinator v5** on the ERC20 chains
+and **HTLCNative v2** on Rootstock (caller-bound
+`refundBySig`, `rehash`, permissionless `refundFor`, the coordinator creates
+with the depositor as sender; see `docs/plans/evm-rehash-and-collab-refund.md`).
+Deployed via CREATE2, so the addresses are identical on every chain.
 
-The source in this repo is already the next generation and is **not deployed
-yet**: **HTLCErc20 v7 / HTLCCoordinator v5** and **HTLCNative v2 /
-HTLCNativeCoordinator v2** (caller-bound `refundBySig`, `rehash`,
-permissionless `refundFor`, coordinators create with the depositor as sender;
-see `docs/plans/evm-rehash-and-collab-refund.md`). It ships with the backend,
-SDK and frontend changes that depend on it, not before.
+The previous generation (HTLCErc20 v6 / HTLCCoordinator v4, HTLCNative v1)
+stays live as a `legacy` entry with `serves_epoch: 1` in the backend config.
+It settles the swaps created on it and keeps serving SDKs that predate v7.
+On v6 `refundBySig` is stubbed (`Unimplemented()`), so those swaps only have
+timeout refunds.
 
 ### Deploying the next version
 
@@ -253,8 +251,8 @@ source `VERSION`s they are about to deploy; check them against this section.
 
 ### Polygon (Chain ID: 137)
 
-- HTLCErc20 (v6): [`0xf12A26a6CEfc1F5a0772fAf09F94c5e5662a3948`](https://polygonscan.com/address/0xf12A26a6CEfc1F5a0772fAf09F94c5e5662a3948)
-- HTLCCoordinator: [`0xdb76F29f1d04D1202f56a34549869b070DFcBfF0`](https://polygonscan.com/address/0xdb76F29f1d04D1202f56a34549869b070DFcBfF0)
+- HTLCErc20 (v7): [`0x6C38bF44A327bf36BfbeFcedc514c0FB3Fec6748`](https://polygonscan.com/address/0x6C38bF44A327bf36BfbeFcedc514c0FB3Fec6748)
+- HTLCCoordinator (v5): [`0xb79118233552d4b7eD5c8D2d1E2BbA7e8eecb71f`](https://polygonscan.com/address/0xb79118233552d4b7eD5c8D2d1E2BbA7e8eecb71f)
 
 Tokens:
 
@@ -262,8 +260,8 @@ Tokens:
 
 ### Ethereum (Chain ID: 1)
 
-- HTLCErc20 (v6): [`0xf12A26a6CEfc1F5a0772fAf09F94c5e5662a3948`](https://etherscan.io/address/0xf12A26a6CEfc1F5a0772fAf09F94c5e5662a3948)
-- HTLCCoordinator: [`0xdb76F29f1d04D1202f56a34549869b070DFcBfF0`](https://etherscan.io/address/0xdb76F29f1d04D1202f56a34549869b070DFcBfF0)
+- HTLCErc20 (v7): [`0x6C38bF44A327bf36BfbeFcedc514c0FB3Fec6748`](https://etherscan.io/address/0x6C38bF44A327bf36BfbeFcedc514c0FB3Fec6748)
+- HTLCCoordinator (v5): [`0xb79118233552d4b7eD5c8D2d1E2BbA7e8eecb71f`](https://etherscan.io/address/0xb79118233552d4b7eD5c8D2d1E2BbA7e8eecb71f)
 
 Tokens:
 
@@ -271,8 +269,8 @@ Tokens:
 
 ### Arbitrum (Chain ID: 42161)
 
-- HTLCErc20 (v6): [`0xf12A26a6CEfc1F5a0772fAf09F94c5e5662a3948`](https://arbiscan.io/address/0xf12A26a6CEfc1F5a0772fAf09F94c5e5662a3948)
-- HTLCCoordinator: [`0xdb76F29f1d04D1202f56a34549869b070DFcBfF0`](https://arbiscan.io/address/0xdb76F29f1d04D1202f56a34549869b070DFcBfF0)
+- HTLCErc20 (v7): [`0x6C38bF44A327bf36BfbeFcedc514c0FB3Fec6748`](https://arbiscan.io/address/0x6C38bF44A327bf36BfbeFcedc514c0FB3Fec6748)
+- HTLCCoordinator (v5): [`0xb79118233552d4b7eD5c8D2d1E2BbA7e8eecb71f`](https://arbiscan.io/address/0xb79118233552d4b7eD5c8D2d1E2BbA7e8eecb71f)
 - TronBridgeAdapter: [`0x5f6050f1a45566c802d58dA1c1124Df48bBbC444`](https://arbiscan.io/address/0x5f6050f1a45566c802d58dA1c1124Df48bBbC444)
 
 Tokens:
@@ -281,24 +279,22 @@ Tokens:
 
 ### Rootstock (Chain ID: 30)
 
-The lock asset is RBTC itself, so the deployed pair is **HTLCNative v1** +
-**HTLCNativeCoordinator v1** (the source here is already v2 / v2: `refundBySig`,
-`rehash`, `refundFor`, depositor as sender; not deployed yet), deployed with
-`script/deploy-rootstock.sh`
-(CREATE2, salt `0x…03`, legacy transactions, Blockscout verification).
+The lock asset is RBTC itself, so the deployed contract is **HTLCNative v2**
+(`refundBySig`, `rehash`, `refundFor`, depositor as sender). The depositor
+locks directly, so v2 has no coordinator. Deployed with
+`script/deploy-rootstock.sh` (CREATE2, salt `0x…03`, legacy transactions,
+Blockscout verification).
 Addresses are lowercase: Rootstock tooling uses EIP-1191 checksums.
 
-- HTLCNative: [`0x18123a31261a76c74c82ed2f8346002caa78ab39`](https://rootstock.blockscout.com/address/0x18123a31261a76c74c82ed2f8346002caa78ab39)
-- HTLCNativeCoordinator: [`0x447a4cd711ce66d25c7008d26d5f09ca7d621f48`](https://rootstock.blockscout.com/address/0x447a4cd711ce66d25c7008d26d5f09ca7d621f48)
+- HTLCNative (v2): [`0x21e1b489ba2f12a854deae6dc67091f608cdacbc`](https://rootstock.blockscout.com/address/0x21e1b489ba2f12a854deae6dc67091f608cdacbc)
 
 ### Rootstock Testnet (Chain ID: 31)
 
-Same salt, owner and bytecode as mainnet, so the same addresses (deployed
-2026-09-24, verified on [rootstock-testnet.blockscout.com](https://rootstock-testnet.blockscout.com)).
+Same salt, owner and bytecode as mainnet, so the same address (verified on
+[rootstock-testnet.blockscout.com](https://rootstock-testnet.blockscout.com)).
 Served by the mutinynet daemon under `network.rootstock_chain_id: 31`.
 
-- HTLCNative: [`0x18123a31261a76c74c82ed2f8346002caa78ab39`](https://rootstock-testnet.blockscout.com/address/0x18123a31261a76c74c82ed2f8346002caa78ab39)
-- HTLCNativeCoordinator: [`0x447a4cd711ce66d25c7008d26d5f09ca7d621f48`](https://rootstock-testnet.blockscout.com/address/0x447a4cd711ce66d25c7008d26d5f09ca7d621f48)
+- HTLCNative (v2): [`0x21e1b489ba2f12a854deae6dc67091f608cdacbc`](https://rootstock-testnet.blockscout.com/address/0x21e1b489ba2f12a854deae6dc67091f608cdacbc)
 
 Testnet RBTC: https://faucet.rootstock.io. A fresh account sending two
 transactions back to back trips RSKj's per-account tx-pool quota ("account
@@ -309,6 +305,8 @@ exceeds quota"); the deploy script sends them one at a time and is safe to rerun
 Still live — in-flight swaps created on them settle against their stored
 address and version. Do not remove until no unresolved swaps reference them.
 
+- Polygon, Ethereum, Arbitrum (v6, superseded by v7, kept in config as `legacy` with `serves_epoch: 1` for SDKs that predate v7): HTLCErc20 `0xf12A26a6CEfc1F5a0772fAf09F94c5e5662a3948`, HTLCCoordinator (v4) `0xdb76F29f1d04D1202f56a34549869b070DFcBfF0`
+- Rootstock mainnet + testnet (native v1, deployed 2026-09-24, superseded by v2, kept as `legacy` with `serves_epoch: 1`): HTLCNative `0x18123a31261a76c74c82ed2f8346002caa78ab39`, HTLCNativeCoordinator `0x447a4cd711ce66d25c7008d26d5f09ca7d621f48` (no longer used)
 - All chains (v5, 2026-08-14, never served production): HTLCErc20 `0x16f898C8E56daE38f782302e35f3eF3E51524fF6`, HTLCCoordinator `0xD26eF0b3AC359B02b0ED6276e82CF9Ad4718aE05`
 - All chains (v5, 2026-08-13, never served production): HTLCErc20 `0x1feB479a912bd706bE6d22979Ba5C9ca0e9FDB49`, HTLCCoordinator `0x3cf9385c8D3dC7D9f199f4C9814eC0aCff6c8E7d`
 - All chains (v4, EIP-712 domain version `"4"`): HTLCErc20 `0x5cedE56704374c6Aa37592af9d8818f7abb5147F`, HTLCCoordinator `0xe2E043B72161Ed562b6235D7654E2449871fC58F`
