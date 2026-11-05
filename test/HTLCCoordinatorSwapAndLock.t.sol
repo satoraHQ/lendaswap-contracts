@@ -118,7 +118,7 @@ contract HTLCCoordinatorCreateAndClaimTest is Test {
 
         // 2. Alice signs Permit2 to pull USDC
         (ISignatureTransfer.PermitTransferFrom memory permit, bytes memory signature) =
-            _signPermit2(address(usdc), usdcAmount, 0, address(coordinator), calls);
+            _signPermit2(address(usdc), usdcAmount, 0, alice, calls);
 
         // 3. Create the swap via the coordinator (Bob is claimAddress)
         vm.prank(alice);
@@ -130,13 +130,13 @@ contract HTLCCoordinatorCreateAndClaimTest is Test {
         assertEq(usdc.balanceOf(alice), 40_000e6, "alice should have 40k USDC left");
         assertEq(wbtc.balanceOf(address(htlc)), expectedWbtc, "htlc should hold 1 WBTC");
         assertTrue(
-            htlc.isActive(preimageHash, expectedWbtc, address(wbtc), address(coordinator), bob, timelock),
+            htlc.isActive(preimageHash, expectedWbtc, address(wbtc), alice, bob, timelock),
             "swap should be active"
         );
 
         // 4. Bob claims directly on the HTLC (msg.sender = claimAddress)
         vm.prank(bob);
-        htlc.redeem(preimage, expectedWbtc, address(wbtc), address(coordinator), timelock);
+        htlc.redeem(preimage, expectedWbtc, address(wbtc), alice, timelock);
 
         // Verify: Bob received WBTC, HTLC is empty
         assertEq(wbtc.balanceOf(bob), expectedWbtc, "bob should have 1 WBTC");
@@ -150,7 +150,7 @@ contract HTLCCoordinatorCreateAndClaimTest is Test {
         );
 
         (ISignatureTransfer.PermitTransferFrom memory permit, bytes memory signature) =
-            _signPermit2(address(usdc), usdcAmount, 0, address(coordinator), calls);
+            _signPermit2(address(usdc), usdcAmount, 0, alice, calls);
 
         vm.prank(alice);
         coordinator.executeAndCreateWithPermit2(
@@ -161,21 +161,21 @@ contract HTLCCoordinatorCreateAndClaimTest is Test {
         bytes32 wrongPreimage = bytes32(uint256(0xbaadf00d));
         vm.prank(bob);
         vm.expectPartialRevert(HTLCErc20.SwapNotActive.selector);
-        htlc.redeem(wrongPreimage, expectedWbtc, address(wbtc), address(coordinator), timelock);
+        htlc.redeem(wrongPreimage, expectedWbtc, address(wbtc), alice, timelock);
 
         // Verify: WBTC still locked
         assertEq(wbtc.balanceOf(bob), 0, "bob should still have 0 WBTC");
         assertEq(wbtc.balanceOf(address(htlc)), expectedWbtc, "htlc should still hold 1 WBTC");
     }
 
-    function test_executeAndCreate_thenRefundTo_wbtc() public {
-        // 1. Alice creates the swap via Permit2 (no refund calls — she'll take the WBTC directly)
+    function test_executeAndCreate_thenDepositorRefundsOnTheHtlc() public {
+        // 1. Alice creates the swap via Permit2; she is the HTLC sender
         HTLCCoordinator.Call[] memory calls = _buildSwapCalls(
             address(usdc), address(wbtc), usdcAmount, expectedWbtc
         );
 
         (ISignatureTransfer.PermitTransferFrom memory permit, bytes memory signature) =
-            _signPermit2(address(usdc), usdcAmount, 0, address(coordinator), calls);
+            _signPermit2(address(usdc), usdcAmount, 0, alice, calls);
 
         vm.prank(alice);
         coordinator.executeAndCreateWithPermit2(
@@ -188,10 +188,9 @@ contract HTLCCoordinatorCreateAndClaimTest is Test {
         // 2. Bob never claims — timelock expires
         vm.warp(timelock + 1);
 
-        // 3. Anyone can trigger refundTo — WBTC goes directly to Alice
-        address charlie = makeAddr("charlie");
-        vm.prank(charlie);
-        coordinator.refundTo(preimageHash, expectedWbtc, address(wbtc), bob, timelock);
+        // 3. Alice refunds straight on the HTLC; the coordinator is not involved
+        vm.prank(alice);
+        htlc.refund(preimageHash, expectedWbtc, address(wbtc), bob, timelock);
 
         // Verify: Alice received the WBTC directly
         assertEq(wbtc.balanceOf(address(htlc)), 0, "htlc should be empty");

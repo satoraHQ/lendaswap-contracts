@@ -77,8 +77,6 @@ contract HTLCErc20ZeroAddressTest is Test {
     // -- A failed recovery is not an authorisation --
 
     function test_refundBySig_garbageSignature_reverts() public {
-        // refundBySig is stubbed out (79403ad2) pending the dual-sig redesign
-        vm.skip(true);
         _aliceCreate(bob);
 
         vm.prank(eve);
@@ -87,11 +85,7 @@ contract HTLCErc20ZeroAddressTest is Test {
             preimageHash,
             amount,
             address(token),
-            alice,
             timelock,
-            eve,
-            address(token),
-            0,
             27,
             bytes32(uint256(1)),
             bytes32(0) // s = 0 has no valid recovery
@@ -126,8 +120,6 @@ contract HTLCErc20ZeroAddressTest is Test {
     /// would have produced. Without it the settlement underflows on the decrement and
     /// reverts for that reason instead, which would leave the theft itself untested.
     function test_preExistingZeroClaimSwap_cannotBeStolen() public {
-        // refundBySig is stubbed out (79403ad2) pending the dual-sig redesign
-        vm.skip(true);
         SwapKey key = htlc.computeKey(preimageHash, amount, address(token), alice, address(0), timelock);
         vm.store(address(htlc), keccak256(abi.encode(key, SWAPS_SLOT)), bytes32(uint256(1)));
         vm.store(address(htlc), keccak256(abi.encode(address(token), LOCKED_AMOUNTS_SLOT)), bytes32(amount));
@@ -146,11 +138,7 @@ contract HTLCErc20ZeroAddressTest is Test {
             preimageHash,
             amount,
             address(token),
-            alice,
             timelock,
-            eve,
-            address(token),
-            0,
             27,
             bytes32(uint256(1)),
             bytes32(0)
@@ -165,11 +153,9 @@ contract HTLCErc20ZeroAddressTest is Test {
     /// settlement consumes the swap key, cleared before the transfer), so this is a closed
     /// door rather than a fixed leak. Asserted so it stays closed.
     function test_refundBySig_malleatedSignature_reverts() public {
-        // refundBySig is stubbed out (79403ad2) pending the dual-sig redesign
-        vm.skip(true);
         _aliceCreate(bob);
 
-        (uint8 v, bytes32 r, bytes32 s) = _signRefund(bobPk, alice, eve, eve, address(token), 0);
+        (uint8 v, bytes32 r, bytes32 s) = _signRefund(bobPk, alice);
 
         uint256 n = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141;
         bytes32 flippedS = bytes32(n - uint256(s));
@@ -177,30 +163,26 @@ contract HTLCErc20ZeroAddressTest is Test {
         // give 26, which is not a recovery id at all and would fail for the wrong reason.
         uint8 flippedV = v == 27 ? 28 : 27;
 
-        vm.prank(eve);
+        vm.prank(alice);
         vm.expectRevert(abi.encodeWithSelector(ECDSA.ECDSAInvalidSignatureS.selector, flippedS));
-        htlc.refundBySig(
-            preimageHash, amount, address(token), alice, timelock, eve, address(token), 0, flippedV, r, flippedS
-        );
+        htlc.refundBySig(preimageHash, amount, address(token), timelock, flippedV, r, flippedS);
 
-        assertEq(token.balanceOf(eve), 0, "the malleated form must settle nothing");
+        assertEq(token.balanceOf(address(htlc)), amount, "the malleated form must settle nothing");
     }
 
     // -- Valid signatures still settle --
 
     function test_refundBySig_validSignature_stillWorks() public {
-        // refundBySig is stubbed out (79403ad2) pending the dual-sig redesign
-        vm.skip(true);
         _aliceCreate(bob);
 
-        (uint8 v, bytes32 r, bytes32 s) = _signRefund(bobPk, alice, eve, eve, address(token), 0);
+        (uint8 v, bytes32 r, bytes32 s) = _signRefund(bobPk, alice);
 
-        vm.prank(eve);
-        address recovered =
-            htlc.refundBySig(preimageHash, amount, address(token), alice, timelock, eve, address(token), 0, v, r, s);
+        uint256 aliceBefore = token.balanceOf(alice);
+        vm.prank(alice);
+        address recovered = htlc.refundBySig(preimageHash, amount, address(token), timelock, v, r, s);
 
         assertEq(recovered, bob, "should recover bob");
-        assertEq(token.balanceOf(eve), amount, "caller receives the tokens");
+        assertEq(token.balanceOf(alice), aliceBefore + amount, "the sender receives the tokens");
     }
 
     function test_redeem_validPreimage_stillWorks() public {
@@ -219,32 +201,12 @@ contract HTLCErc20ZeroAddressTest is Test {
         htlc.create(preimageHash, amount, address(token), claimAddress, timelock);
     }
 
-    function _signRefund(
-        uint256 pk,
-        address refundAddress,
-        address caller,
-        address destination,
-        address sweepToken,
-        uint256 minAmountOut
-    ) internal view returns (uint8 v, bytes32 r, bytes32 s) {
+    function _signRefund(uint256 pk, address sender) internal view returns (uint8 v, bytes32 r, bytes32 s) {
         bytes32 digest = keccak256(
             abi.encodePacked(
                 "\x19\x01",
                 htlc.DOMAIN_SEPARATOR(),
-                keccak256(
-                    abi.encode(
-                        htlc.TYPEHASH_REFUND(),
-                        preimageHash,
-                        amount,
-                        address(token),
-                        refundAddress,
-                        timelock,
-                        caller,
-                        destination,
-                        sweepToken,
-                        minAmountOut
-                    )
-                )
+                keccak256(abi.encode(htlc.TYPEHASH_REFUND(), preimageHash, amount, address(token), sender, timelock))
             )
         );
         (v, r, s) = vm.sign(pk, digest);

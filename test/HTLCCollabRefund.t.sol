@@ -7,7 +7,7 @@ import {ERC20Permit} from "@openzeppelin/contracts/token/ERC20/extensions/ERC20P
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {ISignatureTransfer} from "permit2/interfaces/ISignatureTransfer.sol";
 import {DeployPermit2} from "../lib/permit2/test/utils/DeployPermit2.sol";
-import {HTLCErc20} from "../src/HTLCErc20.sol";
+import {HTLCErc20, SwapKey} from "../src/HTLCErc20.sol";
 import {HTLCCoordinator} from "../src/HTLCCoordinator.sol";
 
 contract MockUSDC is ERC20, ERC20Permit {
@@ -115,404 +115,313 @@ contract HTLCCollabRefundTest is Test {
     // ---------------------------------------------------------------
 
     function test_refundBySig_basic() public {
-        // refundBySig is stubbed out (79403ad2) pending the dual-sig redesign
-        vm.skip(true);
-        // Alice locks WBTC with Bob as claimAddress
-        vm.startPrank(alice);
-        wbtc.approve(address(htlc), wbtcAmount);
-        htlc.create(preimageHash, wbtcAmount, address(wbtc), bob, timelock);
-        vm.stopPrank();
+        _aliceLockDirect();
 
-        // Bob signs refundBySig (waiving timelock), authorizing relay as caller
-        // destination=alice, sweepToken=wbtc, minAmountOut=0
-        (uint8 v, bytes32 r, bytes32 s) = _signHTLCRefund(
-            bobPk, preimageHash, wbtcAmount, address(wbtc), alice, timelock, relay, alice, address(wbtc), 0
-        );
+        // Bob (claimAddress) signs a Refund with alice as the sender
+        (uint8 v, bytes32 r, bytes32 s) = _signHTLCRefund(bobPk, alice);
 
-        // Relay calls refundBySig — tokens go to relay (msg.sender)
-        vm.prank(relay);
-        address recovered = htlc.refundBySig(
-            preimageHash, wbtcAmount, address(wbtc), alice, timelock, alice, address(wbtc), 0, v, r, s
-        );
+        // Alice (the sender) calls — tokens come back to her
+        uint256 aliceBefore = wbtc.balanceOf(alice);
+        vm.prank(alice);
+        address recovered = htlc.refundBySig(preimageHash, wbtcAmount, address(wbtc), timelock, v, r, s);
 
         assertEq(recovered, bob, "should recover bob as claimAddress");
-        assertEq(wbtc.balanceOf(relay), wbtcAmount, "relay should have the WBTC");
+        assertEq(wbtc.balanceOf(alice), aliceBefore + wbtcAmount, "alice should have the WBTC back");
         assertEq(wbtc.balanceOf(address(htlc)), 0, "htlc should be empty");
         assertFalse(htlc.isActive(preimageHash, wbtcAmount, address(wbtc), alice, bob, timelock));
     }
 
     function test_refundBySig_beforeTimelock() public {
-        // refundBySig is stubbed out (79403ad2) pending the dual-sig redesign
-        vm.skip(true);
-        // Verify it works BEFORE timelock (the whole point)
-        vm.startPrank(alice);
-        wbtc.approve(address(htlc), wbtcAmount);
-        htlc.create(preimageHash, wbtcAmount, address(wbtc), bob, timelock);
-        vm.stopPrank();
-
-        // Don't warp — still before timelock
+        _aliceLockDirect();
         assertLt(block.timestamp, timelock, "should be before timelock");
 
-        (uint8 v, bytes32 r, bytes32 s) = _signHTLCRefund(
-            bobPk, preimageHash, wbtcAmount, address(wbtc), alice, timelock, relay, alice, address(wbtc), 0
-        );
+        (uint8 v, bytes32 r, bytes32 s) = _signHTLCRefund(bobPk, alice);
 
-        vm.prank(relay);
-        htlc.refundBySig(preimageHash, wbtcAmount, address(wbtc), alice, timelock, alice, address(wbtc), 0, v, r, s);
-
-        assertEq(wbtc.balanceOf(relay), wbtcAmount, "should succeed before timelock");
-    }
-
-    function test_refundBySig_wrongSigner_reverts() public {
-        // refundBySig is stubbed out (79403ad2) pending the dual-sig redesign
-        vm.skip(true);
-        vm.startPrank(alice);
-        wbtc.approve(address(htlc), wbtcAmount);
-        htlc.create(preimageHash, wbtcAmount, address(wbtc), bob, timelock);
-        vm.stopPrank();
-
-        // Alice signs instead of Bob — wrong signer (alice is refundAddress, not claimAddress)
-        (uint8 v, bytes32 r, bytes32 s) = _signHTLCRefund(
-            alicePk, preimageHash, wbtcAmount, address(wbtc), alice, timelock, relay, alice, address(wbtc), 0
-        );
-
-        vm.prank(relay);
-        vm.expectPartialRevert(HTLCErc20.SwapNotActive.selector);
-        htlc.refundBySig(preimageHash, wbtcAmount, address(wbtc), alice, timelock, alice, address(wbtc), 0, v, r, s);
-    }
-
-    function test_refundBySig_wrongCaller_reverts() public {
-        // refundBySig is stubbed out (79403ad2) pending the dual-sig redesign
-        vm.skip(true);
-        vm.startPrank(alice);
-        wbtc.approve(address(htlc), wbtcAmount);
-        htlc.create(preimageHash, wbtcAmount, address(wbtc), bob, timelock);
-        vm.stopPrank();
-
-        // Signed for relay, but alice calls
-        (uint8 v, bytes32 r, bytes32 s) = _signHTLCRefund(
-            bobPk, preimageHash, wbtcAmount, address(wbtc), alice, timelock, relay, alice, address(wbtc), 0
-        );
-
-        vm.prank(alice); // wrong caller
-        vm.expectPartialRevert(HTLCErc20.SwapNotActive.selector);
-        htlc.refundBySig(preimageHash, wbtcAmount, address(wbtc), alice, timelock, alice, address(wbtc), 0, v, r, s);
-    }
-
-    // ---------------------------------------------------------------
-    // Coordinator.collabRefundAndExecute — direct refund (no calls)
-    // ---------------------------------------------------------------
-
-    function test_collabRefundAndExecute_direct() public {
-        // refundBySig is stubbed out (79403ad2) pending the dual-sig redesign
-        vm.skip(true);
-        // Alice funds via coordinator (swap-and-lock)
-        _aliceSwapAndLock();
-
-        // Both sign for collabRefundAndExecute (sweepToken=wbtc, minAmountOut=0)
-        HTLCCoordinator.Call[] memory calls = new HTLCCoordinator.Call[](0);
-        bytes32 callsHash = _computeCallsHash(calls);
-
-        (uint8 dV, bytes32 dR, bytes32 dS) = _signCollabRefund(
-            alicePk, preimageHash, wbtcAmount, address(wbtc), bob, timelock, relay, address(wbtc), 0, callsHash
-        );
-        (uint8 cV, bytes32 cR, bytes32 cS) = _signHTLCRefund(
-            bobPk,
-            preimageHash,
-            wbtcAmount,
-            address(wbtc),
-            address(coordinator),
-            timelock,
-            address(coordinator),
-            alice,
-            address(wbtc),
-            0
-        );
-        uint256 aliceBefore = wbtc.balanceOf(alice);
-
-        vm.prank(relay);
-        coordinator.collabRefundAndExecute(
-            preimageHash, wbtcAmount, address(wbtc), bob, timelock, calls, address(wbtc), 0, dV, dR, dS, cV, cR, cS
-        );
-
-        assertEq(wbtc.balanceOf(alice), aliceBefore + wbtcAmount, "alice should get WBTC back");
-        assertEq(wbtc.balanceOf(address(htlc)), 0, "htlc should be empty");
-        assertEq(wbtc.balanceOf(address(coordinator)), 0, "coordinator should be empty");
-    }
-
-    function test_collabRefundAndExecute_direct_beforeTimelock() public {
-        // refundBySig is stubbed out (79403ad2) pending the dual-sig redesign
-        vm.skip(true);
-        _aliceSwapAndLock();
-
-        assertLt(block.timestamp, timelock, "should be before timelock");
-
-        HTLCCoordinator.Call[] memory calls = new HTLCCoordinator.Call[](0);
-        bytes32 callsHash = _computeCallsHash(calls);
-
-        (uint8 dV, bytes32 dR, bytes32 dS) = _signCollabRefund(
-            alicePk, preimageHash, wbtcAmount, address(wbtc), bob, timelock, relay, address(wbtc), 0, callsHash
-        );
-        (uint8 cV, bytes32 cR, bytes32 cS) = _signHTLCRefund(
-            bobPk,
-            preimageHash,
-            wbtcAmount,
-            address(wbtc),
-            address(coordinator),
-            timelock,
-            address(coordinator),
-            alice,
-            address(wbtc),
-            0
-        );
-
-        vm.prank(relay);
-        coordinator.collabRefundAndExecute(
-            preimageHash, wbtcAmount, address(wbtc), bob, timelock, calls, address(wbtc), 0, dV, dR, dS, cV, cR, cS
-        );
+        vm.prank(alice);
+        htlc.refundBySig(preimageHash, wbtcAmount, address(wbtc), timelock, v, r, s);
 
         assertEq(wbtc.balanceOf(address(htlc)), 0, "should succeed before timelock");
     }
 
-    // ---------------------------------------------------------------
-    // Coordinator.collabRefundAndExecute — with DEX swap-back
-    // ---------------------------------------------------------------
+    function test_refundBySig_wrongSigner_reverts() public {
+        _aliceLockDirect();
 
-    function test_collabRefundAndExecute_swapBack() public {
-        // refundBySig is stubbed out (79403ad2) pending the dual-sig redesign
-        vm.skip(true);
-        _aliceSwapAndLock();
+        // Alice signs instead of Bob: the recovered claimAddress addresses no active key
+        (uint8 v, bytes32 r, bytes32 s) = _signHTLCRefund(alicePk, alice);
 
-        // Server takes fee + swaps WBTC -> USDC for alice
-        uint256 fee = 1000; // 0.00001000 WBTC
-        uint256 swapAmount = wbtcAmount - fee;
-        uint256 expectedUsdc = (swapAmount * 60_000e6) / 1e8;
-
-        // Build calls: fee skim + approve + DEX swap
-        HTLCCoordinator.Call[] memory calls = new HTLCCoordinator.Call[](3);
-        calls[0] = HTLCCoordinator.Call({
-            target: address(wbtc), value: 0, callData: abi.encodeCall(IERC20.transfer, (relay, fee))
-        });
-        calls[1] = HTLCCoordinator.Call({
-            target: address(wbtc), value: 0, callData: abi.encodeCall(IERC20.approve, (address(dex), swapAmount))
-        });
-        calls[2] = HTLCCoordinator.Call({
-            target: address(dex),
-            value: 0,
-            callData: abi.encodeWithSignature(
-                "swap(address,address,uint256,uint256)", address(wbtc), address(usdc), swapAmount, 0
-            )
-        });
-
-        bytes32 callsHash = _computeCallsHash(calls);
-
-        (uint8 dV, bytes32 dR, bytes32 dS) = _signCollabRefund(
-            alicePk, preimageHash, wbtcAmount, address(wbtc), bob, timelock, relay, address(usdc), 0, callsHash
-        );
-        (uint8 cV, bytes32 cR, bytes32 cS) = _signHTLCRefund(
-            bobPk,
-            preimageHash,
-            wbtcAmount,
-            address(wbtc),
-            address(coordinator),
-            timelock,
-            address(coordinator),
-            alice,
-            address(usdc),
-            0
-        );
-
-        uint256 aliceUsdcBefore = usdc.balanceOf(alice);
-
-        vm.prank(relay);
-        coordinator.collabRefundAndExecute(
-            preimageHash, wbtcAmount, address(wbtc), bob, timelock, calls, address(usdc), 0, dV, dR, dS, cV, cR, cS
-        );
-
-        assertEq(wbtc.balanceOf(relay), fee, "relay should get fee");
-        assertEq(usdc.balanceOf(alice), aliceUsdcBefore + expectedUsdc, "alice should get USDC");
-        assertEq(wbtc.balanceOf(address(htlc)), 0, "htlc should be empty");
-        assertEq(wbtc.balanceOf(address(coordinator)), 0, "coordinator should be empty");
+        vm.prank(alice);
+        vm.expectPartialRevert(HTLCErc20.SwapNotActive.selector);
+        htlc.refundBySig(preimageHash, wbtcAmount, address(wbtc), timelock, v, r, s);
     }
 
-    function test_collabRefundAndExecute_feeOnly() public {
-        // refundBySig is stubbed out (79403ad2) pending the dual-sig redesign
-        vm.skip(true);
-        _aliceSwapAndLock();
+    function test_refundBySig_wrongCaller_reverts() public {
+        _aliceLockDirect();
 
-        // Just fee skim, no DEX swap — client gets WBTC minus fee
-        uint256 fee = 1000;
-
-        HTLCCoordinator.Call[] memory calls = new HTLCCoordinator.Call[](1);
-        calls[0] = HTLCCoordinator.Call({
-            target: address(wbtc), value: 0, callData: abi.encodeCall(IERC20.transfer, (relay, fee))
-        });
-
-        bytes32 callsHash = _computeCallsHash(calls);
-
-        (uint8 dV, bytes32 dR, bytes32 dS) = _signCollabRefund(
-            alicePk, preimageHash, wbtcAmount, address(wbtc), bob, timelock, relay, address(wbtc), 0, callsHash
-        );
-        (uint8 cV, bytes32 cR, bytes32 cS) = _signHTLCRefund(
-            bobPk,
-            preimageHash,
-            wbtcAmount,
-            address(wbtc),
-            address(coordinator),
-            timelock,
-            address(coordinator),
-            alice,
-            address(wbtc),
-            0
-        );
-
-        uint256 aliceBefore = wbtc.balanceOf(alice);
-
-        vm.prank(relay);
-        coordinator.collabRefundAndExecute(
-            preimageHash, wbtcAmount, address(wbtc), bob, timelock, calls, address(wbtc), 0, dV, dR, dS, cV, cR, cS
-        );
-
-        assertEq(wbtc.balanceOf(relay), fee, "relay should get fee");
-        assertEq(wbtc.balanceOf(alice), aliceBefore + wbtcAmount - fee, "alice should get WBTC minus fee");
-    }
-
-    // ---------------------------------------------------------------
-    // Error cases
-    // ---------------------------------------------------------------
-
-    function test_collabRefundAndExecute_unknownHTLC_reverts() public {
-        HTLCCoordinator.Call[] memory calls = new HTLCCoordinator.Call[](0);
-        bytes32 callsHash = _computeCallsHash(calls);
-
-        (uint8 dV, bytes32 dR, bytes32 dS) = _signCollabRefund(
-            alicePk, preimageHash, wbtcAmount, address(wbtc), bob, timelock, relay, address(wbtc), 0, callsHash
-        );
-        (uint8 cV, bytes32 cR, bytes32 cS) = _signHTLCRefund(
-            bobPk,
-            preimageHash,
-            wbtcAmount,
-            address(wbtc),
-            address(coordinator),
-            timelock,
-            address(coordinator),
-            alice,
-            address(wbtc),
-            0
-        );
-
-        vm.prank(relay);
-        vm.expectRevert(HTLCCoordinator.UnknownHtlc.selector);
-        coordinator.collabRefundAndExecute(
-            preimageHash, wbtcAmount, address(wbtc), bob, timelock, calls, address(wbtc), 0, dV, dR, dS, cV, cR, cS
-        );
-    }
-
-    function test_collabRefundAndExecute_wrongDepositorSig_reverts() public {
-        _aliceSwapAndLock();
-
-        HTLCCoordinator.Call[] memory calls = new HTLCCoordinator.Call[](0);
-        bytes32 callsHash = _computeCallsHash(calls);
-
-        // Bob signs the depositor sig (wrong — alice is depositor)
-        (uint8 dV, bytes32 dR, bytes32 dS) = _signCollabRefund(
-            bobPk, preimageHash, wbtcAmount, address(wbtc), bob, timelock, relay, address(wbtc), 0, callsHash
-        );
-        (uint8 cV, bytes32 cR, bytes32 cS) = _signHTLCRefund(
-            bobPk,
-            preimageHash,
-            wbtcAmount,
-            address(wbtc),
-            address(coordinator),
-            timelock,
-            address(coordinator),
-            alice,
-            address(wbtc),
-            0
-        );
-
-        vm.prank(relay);
-        vm.expectRevert(HTLCCoordinator.InvalidDepositorSignature.selector);
-        coordinator.collabRefundAndExecute(
-            preimageHash, wbtcAmount, address(wbtc), bob, timelock, calls, address(wbtc), 0, dV, dR, dS, cV, cR, cS
-        );
-    }
-
-    function test_collabRefundAndExecute_wrongClaimSig_reverts() public {
-        // refundBySig is stubbed out (79403ad2) pending the dual-sig redesign
-        vm.skip(true);
-        _aliceSwapAndLock();
-
-        HTLCCoordinator.Call[] memory calls = new HTLCCoordinator.Call[](0);
-        bytes32 callsHash = _computeCallsHash(calls);
-
-        (uint8 dV, bytes32 dR, bytes32 dS) = _signCollabRefund(
-            alicePk, preimageHash, wbtcAmount, address(wbtc), bob, timelock, relay, address(wbtc), 0, callsHash
-        );
-        // Alice signs the claim sig (wrong — bob is claimAddress)
-        (uint8 cV, bytes32 cR, bytes32 cS) = _signHTLCRefund(
-            alicePk,
-            preimageHash,
-            wbtcAmount,
-            address(wbtc),
-            address(coordinator),
-            timelock,
-            address(coordinator),
-            alice,
-            address(wbtc),
-            0
-        );
+        // Signed with alice as sender, but relay calls: the key is built from msg.sender
+        (uint8 v, bytes32 r, bytes32 s) = _signHTLCRefund(bobPk, alice);
 
         vm.prank(relay);
         vm.expectPartialRevert(HTLCErc20.SwapNotActive.selector);
-        coordinator.collabRefundAndExecute(
-            preimageHash, wbtcAmount, address(wbtc), bob, timelock, calls, address(wbtc), 0, dV, dR, dS, cV, cR, cS
+        htlc.refundBySig(preimageHash, wbtcAmount, address(wbtc), timelock, v, r, s);
+
+        assertEq(wbtc.balanceOf(address(htlc)), wbtcAmount, "nothing moved");
+    }
+
+    /// The hole that got the previous refundBySig pulled: the claimAddress alone signs
+    /// and submits, routing the lock to itself before the timelock. The signature now
+    /// names the sender, and the sender is msg.sender, so bob can only ever address a
+    /// key under himself — one that was never funded.
+    function test_refundBySig_claimAddressCannotRefundToItself_reverts() public {
+        _aliceLockDirect();
+
+        (uint8 v, bytes32 r, bytes32 s) = _signHTLCRefund(bobPk, bob);
+
+        vm.prank(bob);
+        vm.expectPartialRevert(HTLCErc20.SwapNotActive.selector);
+        htlc.refundBySig(preimageHash, wbtcAmount, address(wbtc), timelock, v, r, s);
+
+        assertEq(wbtc.balanceOf(bob), 0, "bob must not receive anything");
+        assertEq(wbtc.balanceOf(address(htlc)), wbtcAmount, "htlc must still hold the tokens");
+    }
+
+    /// Every term is in the digest and in the key: a caller that changes any one of
+    /// them recovers a different signer and addresses a key that was never funded.
+    function test_refundBySig_tamperedTerms_reverts() public {
+        _aliceLockDirect();
+        (uint8 v, bytes32 r, bytes32 s) = _signHTLCRefund(bobPk, alice);
+
+        vm.prank(alice);
+        vm.expectPartialRevert(HTLCErc20.SwapNotActive.selector);
+        htlc.refundBySig(preimageHash, wbtcAmount - 1, address(wbtc), timelock, v, r, s);
+
+        vm.prank(alice);
+        vm.expectPartialRevert(HTLCErc20.SwapNotActive.selector);
+        htlc.refundBySig(preimageHash, wbtcAmount, address(wbtc), timelock + 1, v, r, s);
+
+        vm.prank(alice);
+        vm.expectPartialRevert(HTLCErc20.SwapNotActive.selector);
+        htlc.refundBySig(preimageHash, wbtcAmount, address(usdc), timelock, v, r, s);
+
+        assertTrue(htlc.isActive(preimageHash, wbtcAmount, address(wbtc), alice, bob, timelock), "untouched");
+    }
+
+    /// The claimAddress's signature waives the timelock; it does not stop working once
+    /// the timelock has passed. Pinned so a future deadline cannot slip in silently.
+    function test_refundBySig_afterTimelock_stillWorks() public {
+        _aliceLockDirect();
+        (uint8 v, bytes32 r, bytes32 s) = _signHTLCRefund(bobPk, alice);
+
+        vm.warp(timelock + 1 days);
+        vm.prank(alice);
+        htlc.refundBySig(preimageHash, wbtcAmount, address(wbtc), timelock, v, r, s);
+        assertEq(wbtc.balanceOf(address(htlc)), 0);
+    }
+
+    /// A Redeem signature is not a Refund signature: the type strings differ, so the
+    /// digest differs, so the recovered signer addresses no active key.
+    function test_refundBySig_redeemSignature_reverts() public {
+        _aliceLockDirect();
+        bytes32 digest = keccak256(
+            abi.encodePacked(
+                "\x19\x01",
+                htlc.DOMAIN_SEPARATOR(),
+                keccak256(
+                    abi.encode(
+                        htlc.TYPEHASH_REDEEM(),
+                        preimage,
+                        wbtcAmount,
+                        address(wbtc),
+                        alice,
+                        timelock,
+                        alice,
+                        alice,
+                        address(wbtc),
+                        uint256(0),
+                        bytes32(0)
+                    )
+                )
+            )
+        );
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(bobPk, digest);
+
+        vm.prank(alice);
+        vm.expectPartialRevert(HTLCErc20.SwapNotActive.selector);
+        htlc.refundBySig(preimageHash, wbtcAmount, address(wbtc), timelock, v, r, s);
+    }
+
+    function test_refundBySig_replay_reverts() public {
+        _aliceLockDirect();
+        (uint8 v, bytes32 r, bytes32 s) = _signHTLCRefund(bobPk, alice);
+
+        vm.prank(alice);
+        htlc.refundBySig(preimageHash, wbtcAmount, address(wbtc), timelock, v, r, s);
+
+        SwapKey key = htlc.computeKey(preimageHash, wbtcAmount, address(wbtc), alice, bob, timelock);
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(HTLCErc20.SwapNotActive.selector, key, HTLCErc20.SwapState.Refunded));
+        htlc.refundBySig(preimageHash, wbtcAmount, address(wbtc), timelock, v, r, s);
+    }
+
+    function test_refundBySig_thenRedeem_reverts() public {
+        _aliceLockDirect();
+        (uint8 v, bytes32 r, bytes32 s) = _signHTLCRefund(bobPk, alice);
+
+        vm.prank(alice);
+        htlc.refundBySig(preimageHash, wbtcAmount, address(wbtc), timelock, v, r, s);
+
+        SwapKey key = htlc.computeKey(preimageHash, wbtcAmount, address(wbtc), alice, bob, timelock);
+        vm.prank(bob);
+        vm.expectRevert(abi.encodeWithSelector(HTLCErc20.SwapNotActive.selector, key, HTLCErc20.SwapState.Refunded));
+        htlc.redeem(preimage, wbtcAmount, address(wbtc), alice, timelock);
+    }
+
+    // ---------------------------------------------------------------
+    // Coordinator-created swaps: the depositor is the HTLC sender, so every
+    // refund path is a direct HTLC call by the depositor. The coordinator has
+    // no refund function and holds no record of the swap.
+    // ---------------------------------------------------------------
+
+    function test_coordinatorSwap_depositorIsTheSender() public {
+        _aliceSwapAndLock();
+        assertTrue(htlc.isActive(preimageHash, wbtcAmount, address(wbtc), alice, bob, timelock), "key under alice");
+        assertFalse(
+            htlc.isActive(preimageHash, wbtcAmount, address(wbtc), address(coordinator), bob, timelock),
+            "no key under the coordinator"
         );
     }
 
-    function test_collabRefund_doubleSpend_reverts() public {
-        // refundBySig is stubbed out (79403ad2) pending the dual-sig redesign
-        vm.skip(true);
+    function test_coordinatorSwap_refundBySig_byDepositor() public {
+        _aliceSwapAndLock();
+        assertLt(block.timestamp, timelock, "before timelock");
+        (uint8 v, bytes32 r, bytes32 s) = _signHTLCRefund(bobPk, alice);
+
+        vm.prank(alice);
+        htlc.refundBySig(preimageHash, wbtcAmount, address(wbtc), timelock, v, r, s);
+
+        assertEq(wbtc.balanceOf(alice), 10e8 + wbtcAmount, "alice holds the WBTC");
+        assertEq(wbtc.balanceOf(address(htlc)), 0, "htlc empty");
+        assertEq(wbtc.balanceOf(address(coordinator)), 0, "coordinator never touched");
+    }
+
+    function test_coordinatorSwap_refund_afterTimelock_byDepositor() public {
+        _aliceSwapAndLock();
+        vm.warp(timelock + 1);
+
+        vm.prank(alice);
+        htlc.refund(preimageHash, wbtcAmount, address(wbtc), bob, timelock);
+        assertEq(wbtc.balanceOf(alice), 10e8 + wbtcAmount, "alice holds the WBTC");
+    }
+
+    function test_coordinatorSwap_refundToDestination_byDepositor() public {
+        _aliceSwapAndLock();
+        vm.warp(timelock + 1);
+
+        vm.prank(alice);
+        htlc.refund(preimageHash, wbtcAmount, address(wbtc), bob, timelock, relay);
+        assertEq(wbtc.balanceOf(relay), wbtcAmount, "paid where alice pointed");
+    }
+
+    /// A signature over `sender = coordinator` addresses a key that was never
+    /// created: the coordinator is not the sender of anything.
+    function test_coordinatorSwap_signatureForCoordinatorAsSender_isUseless() public {
+        _aliceSwapAndLock();
+        (uint8 v, bytes32 r, bytes32 s) = _signHTLCRefund(bobPk, address(coordinator));
+
+        vm.prank(address(coordinator));
+        vm.expectPartialRevert(HTLCErc20.SwapNotActive.selector);
+        htlc.refundBySig(preimageHash, wbtcAmount, address(wbtc), timelock, v, r, s);
+
+        vm.prank(alice);
+        vm.expectPartialRevert(HTLCErc20.SwapNotActive.selector);
+        htlc.refundBySig(preimageHash, wbtcAmount, address(wbtc), timelock, v, r, s);
+        assertTrue(htlc.isActive(preimageHash, wbtcAmount, address(wbtc), alice, bob, timelock), "untouched");
+    }
+
+    /// `refundFor` on a coordinator-created swap pays the depositor. Naming the
+    /// coordinator as sender addresses a key that was never created, so no refund can
+    /// land in the coordinator's sweepable balance.
+    function test_coordinatorSwap_refundFor_paysTheDepositor() public {
+        _aliceSwapAndLock();
+        vm.warp(timelock + 1);
+
+        vm.prank(relay);
+        vm.expectPartialRevert(HTLCErc20.SwapNotActive.selector);
+        htlc.refundFor(preimageHash, wbtcAmount, address(wbtc), address(coordinator), bob, timelock);
+
+        vm.prank(relay);
+        htlc.refundFor(preimageHash, wbtcAmount, address(wbtc), alice, bob, timelock);
+
+        assertEq(wbtc.balanceOf(alice), 10e8 + wbtcAmount, "alice holds the WBTC");
+        assertEq(wbtc.balanceOf(address(coordinator)), 0, "nothing landed in the coordinator");
+        assertEq(wbtc.balanceOf(relay), 0, "relay paid gas only");
+    }
+
+    function test_coordinatorSwap_strangerCannotRefund() public {
+        _aliceSwapAndLock();
+        vm.warp(timelock + 1);
+
+        vm.prank(relay);
+        vm.expectPartialRevert(HTLCErc20.SwapNotActive.selector);
+        htlc.refund(preimageHash, wbtcAmount, address(wbtc), bob, timelock);
+
+        (uint8 v, bytes32 r, bytes32 s) = _signHTLCRefund(bobPk, alice);
+        vm.prank(relay);
+        vm.expectPartialRevert(HTLCErc20.SwapNotActive.selector);
+        htlc.refundBySig(preimageHash, wbtcAmount, address(wbtc), timelock, v, r, s);
+    }
+
+    function test_coordinatorSwap_redeemAndExecute_withDepositorAsSender() public {
         _aliceSwapAndLock();
 
         HTLCCoordinator.Call[] memory calls = new HTLCCoordinator.Call[](0);
         bytes32 callsHash = _computeCallsHash(calls);
-
-        (uint8 dV, bytes32 dR, bytes32 dS) = _signCollabRefund(
-            alicePk, preimageHash, wbtcAmount, address(wbtc), bob, timelock, relay, address(wbtc), 0, callsHash
+        bytes32 digest = keccak256(
+            abi.encodePacked(
+                "\x19\x01",
+                htlc.DOMAIN_SEPARATOR(),
+                keccak256(
+                    abi.encode(
+                        htlc.TYPEHASH_REDEEM(),
+                        preimage,
+                        wbtcAmount,
+                        address(wbtc),
+                        alice,
+                        timelock,
+                        address(coordinator),
+                        bob,
+                        address(wbtc),
+                        wbtcAmount,
+                        callsHash
+                    )
+                )
+            )
         );
-        (uint8 cV, bytes32 cR, bytes32 cS) = _signHTLCRefund(
-            bobPk,
-            preimageHash,
-            wbtcAmount,
-            address(wbtc),
-            address(coordinator),
-            timelock,
-            address(coordinator),
-            alice,
-            address(wbtc),
-            0
-        );
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(bobPk, digest);
 
         vm.prank(relay);
-        coordinator.collabRefundAndExecute(
-            preimageHash, wbtcAmount, address(wbtc), bob, timelock, calls, address(wbtc), 0, dV, dR, dS, cV, cR, cS
+        coordinator.redeemAndExecute(
+            preimage, wbtcAmount, address(wbtc), alice, timelock, calls, address(wbtc), wbtcAmount, bob, v, r, s
         );
-
-        // Try again — should fail (deposit already cleared)
-        vm.prank(relay);
-        vm.expectRevert(HTLCCoordinator.UnknownHtlc.selector);
-        coordinator.collabRefundAndExecute(
-            preimageHash, wbtcAmount, address(wbtc), bob, timelock, calls, address(wbtc), 0, dV, dR, dS, cV, cR, cS
-        );
+        assertEq(wbtc.balanceOf(bob), wbtcAmount, "bob paid through the coordinator");
     }
 
     // ---------------------------------------------------------------
     // Helpers
     // ---------------------------------------------------------------
 
+    function _aliceLockDirect() internal {
+        vm.startPrank(alice);
+        wbtc.approve(address(htlc), wbtcAmount);
+        htlc.create(preimageHash, wbtcAmount, address(wbtc), bob, timelock);
+        vm.stopPrank();
+    }
+
     /// @dev Alice does executeAndCreateWithPermit2: USDC -> DEX swap -> WBTC, lock with bob as claimAddress
     function _aliceSwapAndLock() internal {
+        _aliceSwapAndLockWith(bob, 0);
+    }
+
+    function _aliceSwapAndLockWith(address claimAddress, uint256 nonce) internal {
         HTLCCoordinator.Call[] memory calls = new HTLCCoordinator.Call[](2);
         calls[0] = HTLCCoordinator.Call({
             target: address(usdc), value: 0, callData: abi.encodeCall(IERC20.approve, (address(dex), usdcAmount))
@@ -526,11 +435,11 @@ contract HTLCCollabRefundTest is Test {
         });
 
         (ISignatureTransfer.PermitTransferFrom memory permit, bytes memory signature) =
-            _signPermit2(address(usdc), usdcAmount, 0, calls);
+            _signPermit2(address(usdc), usdcAmount, nonce, claimAddress, calls);
 
         vm.prank(alice);
         coordinator.executeAndCreateWithPermit2(
-            calls, preimageHash, address(wbtc), bob, timelock, alice, permit, signature
+            calls, preimageHash, address(wbtc), claimAddress, timelock, alice, permit, signature
         );
     }
 
@@ -538,6 +447,7 @@ contract HTLCCollabRefundTest is Test {
         address token,
         uint256 amount,
         uint256 nonce,
+        address claimAddress,
         HTLCCoordinator.Call[] memory calls
     ) internal view returns (ISignatureTransfer.PermitTransferFrom memory permit, bytes memory signature) {
         permit = ISignatureTransfer.PermitTransferFrom({
@@ -546,7 +456,8 @@ contract HTLCCollabRefundTest is Test {
             deadline: block.timestamp + 1 hours
         });
 
-        bytes32 witness = _computeWitness(preimageHash, address(wbtc), bob, address(coordinator), timelock, calls);
+        bytes32 witness =
+            _computeWitness(preimageHash, address(wbtc), claimAddress, alice, timelock, calls);
         signature = _signPermit2WitnessTransfer(permit, witness, alicePk);
     }
 
@@ -611,70 +522,15 @@ contract HTLCCollabRefundTest is Test {
         return keccak256(callsData);
     }
 
-    function _signHTLCRefund(
-        uint256 pk,
-        bytes32 _preimageHash,
-        uint256 amount,
-        address token,
-        address refundAddress,
-        uint256 _timelock,
-        address caller,
-        address destination,
-        address sweepToken,
-        uint256 minAmountOut
-    ) internal view returns (uint8 v, bytes32 r, bytes32 s) {
+    /// @dev HTLC-level `Refund`: the claimAddress signs over the swap terms with the
+    ///      sender that will call refundBySig.
+    function _signHTLCRefund(uint256 pk, address sender) internal view returns (uint8 v, bytes32 r, bytes32 s) {
         bytes32 digest = keccak256(
             abi.encodePacked(
                 "\x19\x01",
                 htlc.DOMAIN_SEPARATOR(),
                 keccak256(
-                    abi.encode(
-                        htlc.TYPEHASH_REFUND(),
-                        _preimageHash,
-                        amount,
-                        token,
-                        refundAddress,
-                        _timelock,
-                        caller,
-                        destination,
-                        sweepToken,
-                        minAmountOut
-                    )
-                )
-            )
-        );
-        (v, r, s) = vm.sign(pk, digest);
-    }
-
-    function _signCollabRefund(
-        uint256 pk,
-        bytes32 _preimageHash,
-        uint256 amount,
-        address token,
-        address claimAddress,
-        uint256 _timelock,
-        address caller,
-        address sweepToken,
-        uint256 minAmountOut,
-        bytes32 callsHash
-    ) internal view returns (uint8 v, bytes32 r, bytes32 s) {
-        bytes32 digest = keccak256(
-            abi.encodePacked(
-                "\x19\x01",
-                coordinator.DOMAIN_SEPARATOR(),
-                keccak256(
-                    abi.encode(
-                        coordinator.TYPEHASH_COLLAB_REFUND(),
-                        _preimageHash,
-                        amount,
-                        token,
-                        claimAddress,
-                        _timelock,
-                        caller,
-                        sweepToken,
-                        minAmountOut,
-                        callsHash
-                    )
+                    abi.encode(htlc.TYPEHASH_REFUND(), preimageHash, wbtcAmount, address(wbtc), sender, timelock)
                 )
             )
         );

@@ -31,11 +31,14 @@ contract NonReceiver {
 }
 
 contract HTLCNativeCoordinatorExecuteAndCreateTest is NativeCoordinatorFixture {
-    function test_plainLock_recordsDepositAndLocksExactly() public {
+    function test_plainLock_locksExactlyUnderTheDepositor() public {
         _lock();
 
-        assertTrue(_isActive(amount), "swap active");
-        assertEq(coordinator.deposits(_key(amount)), alice, "depositor recorded");
+        assertTrue(_isActive(amount), "swap active under alice");
+        assertFalse(
+            htlc.isActive(preimageHash, amount, address(0), address(coordinator), bob, timelock),
+            "no key under the coordinator"
+        );
         assertEq(address(htlc).balance, amount, "htlc holds the lock");
         assertEq(htlc.lockedTotal(), amount, "lockedTotal");
         assertEq(address(coordinator).balance, 0, "coordinator keeps nothing");
@@ -215,10 +218,9 @@ contract HTLCNativeCoordinatorExecuteAndCreateTest is NativeCoordinatorFixture {
 
     function test_sameKeyTwice_reverts() public {
         _lock();
+        bytes memory err = abi.encodeWithSelector(HTLCNative.SwapExists.selector, _key(amount), HTLCNative.SwapState.Active);
         vm.prank(alice);
-        vm.expectRevert(
-            abi.encodeWithSelector(HTLCNative.SwapExists.selector, _key(amount), HTLCNative.SwapState.Active)
-        );
+        vm.expectRevert(err);
         coordinator.executeAndCreate{value: amount}(noCalls, preimageHash, amount, bob, timelock);
     }
 
@@ -233,6 +235,8 @@ contract HTLCNativeCoordinatorExecuteAndCreateTest is NativeCoordinatorFixture {
         NonReceiver nr = new NonReceiver();
         vm.deal(address(nr), 2 ether);
         nr.lock{value: amount}(coordinator, preimageHash, amount, bob, timelock);
-        assertEq(coordinator.deposits(_key(amount)), address(nr), "contract depositor recorded");
+        assertTrue(
+            htlc.isActive(preimageHash, amount, address(0), address(nr), bob, timelock), "locked under the contract"
+        );
     }
 }

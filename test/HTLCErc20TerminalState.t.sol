@@ -100,12 +100,10 @@ contract HTLCErc20TerminalStateTest is Test {
     /// is only reachable through a collaborative refund (before expiry), so that
     /// is the path exercised here.
     function test_refundedKey_cannotBeCreatedAgain() public {
-        // refundBySig is stubbed out (79403ad2) pending the dual-sig redesign
-        vm.skip(true);
         _create();
-        (uint8 v, bytes32 r, bytes32 s) = _signRefund(bobPk, alice, alice, alice, address(token), 0);
+        (uint8 v, bytes32 r, bytes32 s) = _signRefund(bobPk, alice);
         vm.prank(alice);
-        htlc.refundBySig(preimageHash, amount, address(token), alice, timelock, alice, address(token), 0, v, r, s);
+        htlc.refundBySig(preimageHash, amount, address(token), timelock, v, r, s);
 
         (HTLCErc20.SwapState state,) = htlc.swapState(key);
         assertEq(uint8(state), uint8(HTLCErc20.SwapState.Refunded), "collab refund is terminal");
@@ -121,32 +119,12 @@ contract HTLCErc20TerminalStateTest is Test {
         vm.stopPrank();
     }
 
-    function _signRefund(
-        uint256 pk,
-        address refundAddress,
-        address caller,
-        address destination,
-        address sweepToken,
-        uint256 minAmountOut
-    ) internal view returns (uint8 v, bytes32 r, bytes32 s) {
+    function _signRefund(uint256 pk, address sender) internal view returns (uint8 v, bytes32 r, bytes32 s) {
         bytes32 digest = keccak256(
             abi.encodePacked(
                 "\x19\x01",
                 htlc.DOMAIN_SEPARATOR(),
-                keccak256(
-                    abi.encode(
-                        htlc.TYPEHASH_REFUND(),
-                        preimageHash,
-                        amount,
-                        address(token),
-                        refundAddress,
-                        timelock,
-                        caller,
-                        destination,
-                        sweepToken,
-                        minAmountOut
-                    )
-                )
+                keccak256(abi.encode(htlc.TYPEHASH_REFUND(), preimageHash, amount, address(token), sender, timelock))
             )
         );
         (v, r, s) = vm.sign(pk, digest);

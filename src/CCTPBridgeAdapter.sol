@@ -8,7 +8,7 @@ import {ITokenMessenger} from "./interfaces/ITokenMessenger.sol";
 /// @title CCTPBridgeAdapter
 /// @notice Adapter for Circle's CCTP V2 that integrates with the HTLCCoordinator call flow.
 /// @dev Designed to be called as a `Call` target within HTLCCoordinator's executeAndCreate,
-///      redeemAndExecute, or refundTo flows.
+///      or redeemAndExecute flows.
 ///
 ///      Flow:
 ///        1. Coordinator redeems HTLC → USDC lands in coordinator

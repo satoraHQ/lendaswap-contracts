@@ -30,7 +30,8 @@ contract ReenteringDestination {
 
     receive() external payable {
         hookRan = true;
-        try c.refundTo(preimageHash, amount, claim, timelock) {
+        CallExecutor.Call[] memory calls;
+        try c.executeAndCreate{value: msg.value}(calls, preimageHash, msg.value, claim, timelock) {
             reentrySucceeded = true;
         } catch (bytes memory data) {
             reentryError = bytes4(data);
@@ -60,12 +61,10 @@ contract ReenteringTarget {
 
 contract HTLCNativeCoordinatorEdgeCasesTest is NativeCoordinatorFixture {
     function test_reentryFromSweepDestination_blocked() public {
-        // Two locks: one that Bob sweeps to the reenterer, one it tries to refund mid-sweep.
+        // Bob sweeps to the reenterer, which tries to lock the payout mid-sweep.
         ReenteringDestination dest = new ReenteringDestination(coordinator);
         bytes32 h2 = sha256(abi.encodePacked(bytes32(uint256(0xcafe))));
-        vm.prank(alice);
-        coordinator.executeAndCreate{value: amount}(noCalls, h2, amount, bob, timelock);
-        dest.arm(h2, amount, bob, timelock);
+        dest.arm(h2, amount, bob, timelock + 1 hours);
         _lock();
         vm.warp(timelock);
 
@@ -75,12 +74,9 @@ contract HTLCNativeCoordinatorEdgeCasesTest is NativeCoordinatorFixture {
         assertFalse(dest.reentrySucceeded(), "reentry blocked");
         assertEq(dest.reentryError(), CallExecutor.Reentrancy.selector, "guard fired");
         assertEq(address(dest).balance, amount, "sweep still paid");
-        assertEq(
-            coordinator.deposits(htlc.computeKey(h2, amount, address(0), address(coordinator), bob, timelock)),
-            alice,
-            "other deposit untouched"
+        assertFalse(
+            htlc.isActive(h2, amount, address(0), address(dest), bob, timelock + 1 hours), "nothing locked by the hook"
         );
-        assertEq(coordinator.deposits(_key(amount)), address(0), "settled deposit cleared");
     }
 
     function test_reentryFromCallTarget_blocked() public {
@@ -126,7 +122,7 @@ contract HTLCNativeCoordinatorEdgeCasesTest is NativeCoordinatorFixture {
     }
 
     function test_constants() public view {
-        assertEq(coordinator.VERSION(), 1);
+        assertEq(coordinator.VERSION(), 2);
         assertEq(address(coordinator.HTLC_NATIVE()), address(htlc));
         assertEq(coordinator.PERMIT2(), 0x000000000022D473030F116dDEE9F6B43aC78BA3);
     }

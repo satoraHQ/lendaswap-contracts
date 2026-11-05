@@ -26,15 +26,18 @@ Minimal storage design — only a single `bool` per swap. All parameters are ver
 
 ### HTLCCoordinator
 
-**Purpose**: Compose arbitrary calls (e.g., DEX swaps) with HTLC create/redeem/refund in a single transaction.
+**Purpose**: Compose arbitrary calls (e.g., DEX swaps) with HTLC create/redeem in a single transaction.
 
-Three primary flows:
+Two flows:
 
 1. **executeAndCreate**: Run arbitrary calls (e.g., swap USDC to WBTC via Uniswap), then lock the resulting tokens in an
-   HTLC. Uses Permit2 for gasless token approvals.
+   HTLC with the depositor as the HTLC sender. Uses Permit2 for gasless token approvals.
 2. **redeemAndExecute**: Redeem tokens from an HTLC via EIP-712 signature, run arbitrary calls (e.g., swap WBTC to
-   USDC), then sweep the result to the caller.
-3. **refundTo**: Refund an expired HTLC straight to the original depositor.
+   USDC), then sweep the result to the signed destination.
+
+There is no refund flow on the coordinator (v5+). The depositor is the HTLC sender, so refund, collaborative refund
+(`refundBySig`) and rehash are the depositor's own calls on the HTLC. The deployed v4 coordinator still has `refundTo`
+and `collabRefundAndExecute` for the swaps it created.
 
 ### HTLCNative on Rootstock
 
@@ -215,10 +218,38 @@ See [`tests/tests/e2e_permit2_swap_lock_then_claim.rs`](tests/tests/e2e_permit2_
 Current deployment: **HTLCErc20 v6** (terminal swap state in storage, full
 typed errors; EIP-712 domain version `"6"`) with **HTLCCoordinator v4** (domain
 version `"4"`, `CallFailed(index)` and friends). Deployed via CREATE2, so the
-addresses are identical on every chain. Note: `refundBySig` is stubbed
-(`Unimplemented()`) pending the dual-sig refund redesign — collaborative
-refunds are unavailable on this deployment until it lands; timeout refunds
-work.
+addresses are identical on every chain. Note: on this deployment `refundBySig`
+is stubbed (`Unimplemented()`), so collaborative refunds are unavailable;
+timeout refunds work.
+
+The source in this repo is already the next generation and is **not deployed
+yet**: **HTLCErc20 v7 / HTLCCoordinator v5** and **HTLCNative v2 /
+HTLCNativeCoordinator v2** (caller-bound `refundBySig`, `rehash`,
+permissionless `refundFor`, coordinators create with the depositor as sender;
+see `docs/plans/evm-rehash-and-collab-refund.md`). It ships with the backend,
+SDK and frontend changes that depend on it, not before.
+
+### Deploying the next version
+
+Contracts are not upgradeable and each coordinator pins its HTLC as an
+immutable, so every version is a fresh CREATE2 deploy of the pair. The
+scripts read the bytecode from `out/` after a `forge build` and print the
+source `VERSION`s they are about to deploy; check them against this section.
+
+1. `cd contracts && forge test` on the commit to deploy.
+2. ERC20 chains: `script/deploy-multichain.sh --dry-run`, then without
+   `--dry-run`. Rootstock: `script/deploy-rootstock.sh testnet --dry-run`,
+   `testnet`, then `mainnet`. Same `DEPLOY_SALT` and `HTLC_OWNER` on every
+   chain so the addresses match; changed bytecode already yields new
+   addresses, bump the salt only to redeploy identical bytecode.
+3. Verify on-chain: `cast call <HTLC> "VERSION()(uint8)"` and
+   `cast call <Coordinator> "VERSION()(uint8)"`.
+4. Record the addresses below and move the previous ones to "Legacy
+   deployments". Keep the old pair in the backend config until no unresolved
+   swap references it; in-flight swaps settle against their stored version.
+5. Point the backend at the new pair (`satoraHQ/flake`,
+   `hosts/test/satora-swap.nix` first, then prod) together with the backend
+   release that understands the new version.
 
 ### Polygon (Chain ID: 137)
 
@@ -250,8 +281,10 @@ Tokens:
 
 ### Rootstock (Chain ID: 30)
 
-The lock asset is RBTC itself, so the pair is **HTLCNative v1** +
-**HTLCNativeCoordinator v1**, deployed with `script/deploy-rootstock.sh`
+The lock asset is RBTC itself, so the deployed pair is **HTLCNative v1** +
+**HTLCNativeCoordinator v1** (the source here is already v2 / v2: `refundBySig`,
+`rehash`, `refundFor`, depositor as sender; not deployed yet), deployed with
+`script/deploy-rootstock.sh`
 (CREATE2, salt `0x…03`, legacy transactions, Blockscout verification).
 Addresses are lowercase: Rootstock tooling uses EIP-1191 checksums.
 

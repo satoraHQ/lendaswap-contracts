@@ -477,7 +477,7 @@ async fn test_e2e_permit2_swap_lock_then_claim() -> Result<()> {
             preimage_hash,
             *wbtc.address(),
             lendaswap_address,
-            *coordinator.address(), // refundAddress = coordinator for depositor tracking
+            user_address, // refundAddress = the depositor, who is the HTLC sender
             timelock,
             calls_hash,
         )
@@ -614,7 +614,7 @@ async fn test_e2e_permit2_swap_lock_then_claim() -> Result<()> {
             preimage,
             U256::from(EXPECTED_WBTC),
             *wbtc.address(),
-            *coordinator.address(),
+            user_address,
             timelock,
         )
         .send()

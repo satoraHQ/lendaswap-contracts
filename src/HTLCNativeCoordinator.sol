@@ -2,22 +2,23 @@
 pragma solidity ^0.8.24;
 
 import {CallExecutor} from "./CallExecutor.sol";
-import {HTLCNative, SwapKey} from "./HTLCNative.sol";
+import {HTLCNative} from "./HTLCNative.sol";
 
 /// @title HTLCNativeCoordinator
-/// @notice Coordinates arbitrary call execution with HTLCNative create, redeem and refund
-/// @dev Three primary flows, mirroring `HTLCCoordinator` for the ERC20 pair:
+/// @notice Coordinates arbitrary call execution with HTLCNative create and redeem
+/// @dev Two flows, mirroring `HTLCCoordinator` for the ERC20 pair:
 ///   1. executeAndCreate – run arbitrary calls funded by `msg.value`, then lock exactly
-///      `amount` of the native coin in an HTLC with the coordinator as sender.
+///      `amount` of the native coin in an HTLC with the depositor as sender.
 ///   2. redeemAndExecute – redeem the coin from an HTLC via the claimant's EIP-712
 ///      signature, run arbitrary calls, then sweep the result to the signed destination.
-///   3. refundTo – refund an expired HTLC created via this coordinator straight to the
-///      original depositor.
+///   There is no refund flow: the HTLC names the depositor as its sender, so the
+///   depositor settles it straight on the HTLC (`refund`, and whatever else the HTLC
+///   lets its sender do), and the coordinator keeps no record of the swaps it created.
 ///   The coordinator holds no long-lived funds and has no owner. Any balance that lands
 ///   here outside a flow (`receive`) is swept to the next redeemer's destination, and can
 ///   never become part of a lock.
 contract HTLCNativeCoordinator is CallExecutor {
-    uint8 public constant VERSION = 1;
+    uint8 public constant VERSION = 2;
 
     /// @dev Canonical Permit2. This coordinator never uses it, but a call must not be
     ///      able to spend approvals a user may have granted for the ERC20 coordinator.
@@ -25,20 +26,12 @@ contract HTLCNativeCoordinator is CallExecutor {
 
     // -- Errors --
 
-    /// @dev No deposit is recorded for this HTLC key.
-    error UnknownHtlc();
     /// @dev The calls spent balance that was not part of `msg.value`.
     error CallsOverspent();
 
     // -- Immutables --
 
     HTLCNative public immutable HTLC_NATIVE;
-
-    // -- Storage --
-
-    /// @dev Maps HTLC swap key -> original depositor address.
-    ///      Populated by executeAndCreate, used by refundTo.
-    mapping(SwapKey => address) public deposits;
 
     // -- Constructor --
 
@@ -49,7 +42,7 @@ contract HTLCNativeCoordinator is CallExecutor {
     // -- External functions --
 
     /// @notice Run arbitrary calls funded by `msg.value`, then lock exactly `amount` of
-    ///         the native coin in an HTLC with the coordinator as sender
+    ///         the native coin in an HTLC with the depositor as sender
     /// @dev Sending the value is the authorisation: `msg.sender` is the depositor, and
     ///      `msg.value` is the only input. The calls may spend it (`Call.value`, e.g. a
     ///      DEX swap paid in the coin) and produce native coin; what they may not do is
@@ -60,7 +53,10 @@ contract HTLCNativeCoordinator is CallExecutor {
     ///      a token sent here ahead of a call is a stray anyone can sweep, so ERC20
     ///      input is not supported (an atomic smart-account batch is the caller's
     ///      concern, not this contract's).
-    ///      If the swap expires, refundTo is permissionless but always pays the depositor.
+    ///      The depositor is the HTLC's refund address: the swap key carries `msg.sender`,
+    ///      and any refund is the depositor's own call on the HTLC. A contract depositor
+    ///      with no receive hook must lock the exact amount (any excess is returned to it)
+    ///      and refunds through the HTLC's destination variant.
     /// @param calls        Arbitrary calls to execute before the lock
     /// @param preimageHash SHA-256 preimage hash for the HTLC
     /// @param amount       Exact amount of the native coin to lock
@@ -84,10 +80,7 @@ contract HTLCNativeCoordinator is CallExecutor {
         uint256 received = after_ - before;
         if (received < amount) revert InsufficientBalance();
 
-        HTLC_NATIVE.create{value: amount}(preimageHash, claimAddress, timelock);
-
-        SwapKey key = HTLC_NATIVE.computeKey(preimageHash, amount, address(0), address(this), claimAddress, timelock);
-        deposits[key] = msg.sender;
+        HTLC_NATIVE.create{value: amount}(preimageHash, msg.sender, claimAddress, timelock);
 
         if (received > amount) {
             _transferNative(msg.sender, received - amount);
@@ -103,7 +96,8 @@ contract HTLCNativeCoordinator is CallExecutor {
     ///      HTLC reverts. Extra `msg.value` from the submitter funds `Call.value`.
     /// @param preimage     Secret that SHA-256 hashes to the HTLC's preimageHash
     /// @param amount       Amount locked in the HTLC
-    /// @param htlcSender   Address that created the HTLC
+    /// @param htlcSender   The HTLC's sender / refund address (the depositor, for a swap
+    ///                     created through this coordinator)
     /// @param timelock     Timelock set at HTLC creation
     /// @param calls        Arbitrary calls to execute after redeem (e.g. wrap, DEX swap)
     /// @param sweepToken   Token to sweep to the destination (address(0) for the native coin)
@@ -130,41 +124,12 @@ contract HTLCNativeCoordinator is CallExecutor {
         // destination, sweepToken, minAmountOut and callsHash, so no separate check
         // is needed here and the execution parameters cannot be tampered with.
         bytes32 callsHash = _computeCallsHash(calls);
-        address claimAddress = HTLC_NATIVE.redeemBySig(
+        HTLC_NATIVE.redeemBySig(
             preimage, amount, htlcSender, timelock, destination, sweepToken, minAmountOut, callsHash, v, r, s
         );
 
-        // A swap this coordinator created is settled now; drop its deposit
-        // record so `deposits` only ever names unsettled swaps.
-        if (htlcSender == address(this)) {
-            bytes32 preimageHash = sha256(abi.encodePacked(preimage));
-            delete deposits[
-                HTLC_NATIVE.computeKey(preimageHash, amount, address(0), address(this), claimAddress, timelock)
-            ];
-        }
-
         _executeCalls(calls);
         _sweep(destination, sweepToken, minAmountOut);
-    }
-
-    /// @notice Refund an expired coordinator-created HTLC straight to the original depositor
-    /// @dev Permissionless: anyone can trigger this after timelock expiry, the coin
-    ///      always goes to the depositor regardless of who calls.
-    /// @param preimageHash The preimage hash used at HTLC creation
-    /// @param amount       Amount locked in the HTLC
-    /// @param claimAddress Claim address set at HTLC creation
-    /// @param timelock     Timelock set at HTLC creation
-    function refundTo(bytes32 preimageHash, uint256 amount, address claimAddress, uint256 timelock)
-        external
-        nonReentrant
-    {
-        SwapKey key = HTLC_NATIVE.computeKey(preimageHash, amount, address(0), address(this), claimAddress, timelock);
-        address depositor = deposits[key];
-        if (depositor == address(0)) revert UnknownHtlc();
-
-        delete deposits[key];
-
-        HTLC_NATIVE.refund(preimageHash, amount, claimAddress, timelock, depositor);
     }
 
     // -- Internal --

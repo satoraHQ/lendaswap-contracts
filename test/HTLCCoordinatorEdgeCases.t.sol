@@ -58,6 +58,31 @@ contract MockDEX {
     }
 }
 
+/// @notice A token that re-enters the coordinator while it is being swept out of it.
+contract ReenteringSweepToken is ERC20 {
+    HTLCCoordinator immutable coordinator;
+    bool public hookRan;
+    bytes4 public reentryError;
+
+    constructor(HTLCCoordinator _coordinator) ERC20("Reenter", "RE") {
+        coordinator = _coordinator;
+        _mint(msg.sender, 100e8);
+    }
+
+    function _update(address from, address to, uint256 value) internal override {
+        if (from == address(coordinator) && !hookRan) {
+            hookRan = true;
+            HTLCCoordinator.Call[] memory calls;
+            try coordinator.redeemAndExecute(
+                bytes32(0), 0, address(this), address(0), 0, calls, address(0), 0, address(0), 0, bytes32(0), bytes32(0)
+            ) {} catch (bytes memory data) {
+                reentryError = bytes4(data);
+            }
+        }
+        super._update(from, to, value);
+    }
+}
+
 /// @notice Edge-case and error-path tests for HTLCCoordinator
 contract HTLCCoordinatorEdgeCasesTest is Test {
     bytes32 internal constant TOKEN_PERMISSIONS_TYPEHASH = keccak256("TokenPermissions(address token,uint256 amount)");
@@ -129,7 +154,7 @@ contract HTLCCoordinatorEdgeCasesTest is Test {
         });
 
         (ISignatureTransfer.PermitTransferFrom memory permit, bytes memory signature) =
-            _signPermit2(address(usdc), usdcAmount, 0, address(coordinator), calls);
+            _signPermit2(address(usdc), usdcAmount, 0, alice, calls);
 
         vm.expectPartialRevert(HTLCCoordinator.RestrictedTarget.selector);
         coordinator.executeAndCreateWithPermit2(
@@ -146,7 +171,7 @@ contract HTLCCoordinatorEdgeCasesTest is Test {
         });
 
         (ISignatureTransfer.PermitTransferFrom memory permit, bytes memory signature) =
-            _signPermit2(address(usdc), usdcAmount, 0, address(coordinator), calls);
+            _signPermit2(address(usdc), usdcAmount, 0, alice, calls);
 
         vm.expectPartialRevert(HTLCCoordinator.RestrictedTarget.selector);
         coordinator.executeAndCreateWithPermit2(
@@ -164,7 +189,7 @@ contract HTLCCoordinatorEdgeCasesTest is Test {
 
         // Pull USDC but lock token is WBTC — no swap means zero WBTC balance
         (ISignatureTransfer.PermitTransferFrom memory permit, bytes memory signature) =
-            _signPermit2(address(usdc), usdcAmount, 0, address(coordinator), calls);
+            _signPermit2(address(usdc), usdcAmount, 0, alice, calls);
 
         vm.expectRevert(HTLCCoordinator.InsufficientBalance.selector);
         coordinator.executeAndCreateWithPermit2(
@@ -216,14 +241,65 @@ contract HTLCCoordinatorEdgeCasesTest is Test {
     }
 
     // ---------------------------------------------------------------
-    // UnknownHTLC
+    // Reentrancy
     // ---------------------------------------------------------------
 
-    function test_refundTo_unknownHTLC_reverts() public {
-        vm.warp(timelock + 1);
+    function test_redeemAndExecute_sweepCannotReenter() public {
+        ReenteringSweepToken token = new ReenteringSweepToken(coordinator);
+        token.transfer(alice, wbtcAmount);
+        vm.startPrank(alice);
+        token.approve(address(htlc), wbtcAmount);
+        htlc.create(preimageHash, wbtcAmount, address(token), bob, timelock);
+        vm.stopPrank();
 
-        vm.expectRevert(HTLCCoordinator.UnknownHtlc.selector);
-        coordinator.refundTo(preimageHash, wbtcAmount, address(wbtc), bob, timelock);
+        HTLCCoordinator.Call[] memory noCalls = new HTLCCoordinator.Call[](0);
+        bytes32 callsHash = _computeCallsHash(noCalls);
+        (uint8 v, bytes32 r, bytes32 s) = _signHTLCRedeem(
+            bobPk, preimage, wbtcAmount, address(token), alice, timelock,
+            address(coordinator), bob, address(token), wbtcAmount, callsHash
+        );
+
+        vm.prank(bob);
+        coordinator.redeemAndExecute(
+            preimage, wbtcAmount, address(token), alice, timelock, noCalls, address(token), wbtcAmount, bob, v, r, s
+        );
+
+        assertTrue(token.hookRan(), "the sweep reached the hook");
+        assertEq(token.reentryError(), HTLCCoordinator.Reentrancy.selector, "re-entry hits the declared guard");
+        assertEq(token.balanceOf(bob), wbtcAmount, "the outer sweep still paid bob");
+    }
+
+    // ---------------------------------------------------------------
+    // ZeroDestination
+    // ---------------------------------------------------------------
+
+    function test_redeemAndExecute_zeroDestination_reverts() public {
+        // Alice locks WBTC with Bob as claimAddress
+        vm.startPrank(alice);
+        wbtc.approve(address(htlc), wbtcAmount);
+        htlc.create(preimageHash, wbtcAmount, address(wbtc), bob, timelock);
+        vm.stopPrank();
+
+        // A claimant that signs an unset destination must not burn the tokens.
+        HTLCCoordinator.Call[] memory noCalls = new HTLCCoordinator.Call[](0);
+        bytes32 callsHash = _computeCallsHash(noCalls);
+
+        (uint8 v, bytes32 r, bytes32 s) = _signHTLCRedeem(
+            bobPk, preimage, wbtcAmount, address(wbtc), alice, timelock,
+            address(coordinator), address(0), address(wbtc), wbtcAmount, callsHash
+        );
+
+        vm.prank(bob);
+        vm.expectRevert(HTLCCoordinator.ZeroDestination.selector);
+        coordinator.redeemAndExecute(
+            preimage, wbtcAmount, address(wbtc), alice, timelock,
+            noCalls, address(wbtc), wbtcAmount,
+            address(0),
+            v, r, s
+        );
+
+        assertEq(wbtc.balanceOf(address(htlc)), wbtcAmount, "HTLC still holds the tokens");
+        assertEq(wbtc.balanceOf(address(0)), 0, "nothing burned");
     }
 
     // ---------------------------------------------------------------
@@ -240,7 +316,7 @@ contract HTLCCoordinatorEdgeCasesTest is Test {
         });
 
         (ISignatureTransfer.PermitTransferFrom memory permit, bytes memory signature) =
-            _signPermit2(address(usdc), usdcAmount, 0, address(coordinator), calls);
+            _signPermit2(address(usdc), usdcAmount, 0, alice, calls);
 
         vm.expectPartialRevert(HTLCCoordinator.CallFailed.selector);
         coordinator.executeAndCreateWithPermit2(
@@ -261,7 +337,7 @@ contract HTLCCoordinatorEdgeCasesTest is Test {
         });
 
         (ISignatureTransfer.PermitTransferFrom memory permit, bytes memory signature) =
-            _signPermit2(address(usdc), usdcAmount, 0, address(coordinator), calls);
+            _signPermit2(address(usdc), usdcAmount, 0, alice, calls);
 
         vm.expectPartialRevert(HTLCCoordinator.DangerousSelector.selector);
         coordinator.executeAndCreateWithPermit2(

@@ -45,6 +45,9 @@ echo ""
 echo "Building contracts..."
 (cd "$CONTRACTS_DIR" && forge build --silent)
 echo "Build successful."
+# The versions this checkout deploys; compare against README "Contract Addresses".
+echo "HTLCErc20 VERSION:       $(grep -oE 'VERSION = [0-9]+' "$CONTRACTS_DIR/src/HTLCErc20.sol" | grep -oE '[0-9]+')"
+echo "HTLCCoordinator VERSION: $(grep -oE 'VERSION = [0-9]+' "$CONTRACTS_DIR/src/HTLCCoordinator.sol" | grep -oE '[0-9]+')"
 echo ""
 
 # ─── Predict CREATE2 addresses ─────────────────────────────────────────────

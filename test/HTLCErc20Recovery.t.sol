@@ -22,6 +22,7 @@ contract ReenteringToken is ERC20 {
     HTLCErc20 public htlc;
     bool public armed;
     bool public reentryReverted;
+    bytes4 public reentryError;
 
     constructor() ERC20("Reenter", "RE") {
         _mint(msg.sender, 100e8);
@@ -45,8 +46,9 @@ contract ReenteringToken is ERC20 {
             armed = false;
             try htlc.recoverExcessToken(address(this), address(this)) {
                 reentryReverted = false;
-            } catch {
+            } catch (bytes memory data) {
                 reentryReverted = true;
+                reentryError = bytes4(data);
             }
         }
         super._update(from, to, value);
@@ -220,6 +222,7 @@ contract HTLCErc20RecoveryTest is Test {
         htlc.redeem(preimage, 1e8, address(token), alice, timelock);
 
         assertTrue(token.reentryReverted(), "recovery inside a settlement must revert");
+        assertEq(token.reentryError(), HTLCErc20.Reentrancy.selector, "with the declared Reentrancy() error");
         assertEq(token.balanceOf(bob), 1e8, "the settled swap paid out in full");
         assertEq(htlc.lockedAmounts(address(token)), 1e8, "one swap still outstanding");
         assertGe(

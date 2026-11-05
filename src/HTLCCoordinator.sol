@@ -4,23 +4,25 @@ pragma solidity ^0.8.24;
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ISignatureTransfer} from "permit2/interfaces/ISignatureTransfer.sol";
-import {HTLCErc20, SwapKey} from "./HTLCErc20.sol";
+import {HTLCErc20} from "./HTLCErc20.sol";
 
 /// @title HTLCCoordinator
-/// @notice Coordinates arbitrary call execution with HTLCErc20 create, redeem and refund
-/// @dev Three primary flows:
+/// @notice Coordinates arbitrary call execution with HTLCErc20 create and redeem
+/// @dev Two flows:
 ///   1. executeAndCreate – run arbitrary calls (e.g. DEX swap), then lock the
-///      resulting token balance in an HTLC.
+///      resulting token balance in an HTLC with the depositor as refund address.
 ///   2. redeemAndExecute – redeem tokens from an HTLC via EIP-712 signature,
-///      run arbitrary calls (e.g. DEX swap), then sweep the result to the caller.
-///      Front-running safe: the HTLC-level signature binds to this coordinator as
-///      msg.sender, and the coordinator verifies claimAddress == msg.sender.
-///   3. refundTo – refund an expired HTLC (created via this coordinator) straight
-///      to the original depositor.
+///      run arbitrary calls (e.g. DEX swap), then sweep the result to the signed
+///      destination. Front-running safe: the HTLC-level signature binds to this
+///      coordinator as caller and to the sweep terms.
+///   There is no refund flow. The HTLC names the depositor as its sender, so the
+///   depositor settles it straight on the HTLC (`refund`, `refundBySig`, and whatever
+///   else the HTLC lets its sender do), and the coordinator keeps no record of the
+///   swaps it created.
 contract HTLCCoordinator {
     using SafeERC20 for IERC20;
 
-    uint8 public constant VERSION = 4;
+    uint8 public constant VERSION = 5;
 
     bytes32 public constant TYPEHASH_EXECUTE_AND_CREATE = keccak256(
         "ExecuteAndCreate(bytes32 preimageHash,address token,address claimAddress,address refundAddress,uint256 timelock,bytes32 callsHash)"
@@ -29,32 +31,18 @@ contract HTLCCoordinator {
     string public constant TYPESTRING_EXECUTE_AND_CREATE =
         "ExecuteAndCreate witness)ExecuteAndCreate(bytes32 preimageHash,address token,address claimAddress,address refundAddress,uint256 timelock,bytes32 callsHash)TokenPermissions(address token,uint256 amount)";
 
-    bytes32 public constant TYPEHASH_COLLAB_REFUND = keccak256(
-        "CollabRefund(bytes32 preimageHash,uint256 amount,address token,address claimAddress,uint256 timelock,address caller,address sweepToken,uint256 minAmountOut,bytes32 callsHash)"
-    );
-
-    bytes32 public immutable DOMAIN_SEPARATOR = keccak256(
-        abi.encode(
-            keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
-            keccak256("HTLCCoordinator"),
-            keccak256("4"),
-            block.chainid,
-            address(this)
-        )
-    );
-
     // -- Errors --
 
     error Reentrancy();
 
     /// @dev The router's balance is below the required minimum for the operation.
     error InsufficientBalance();
-    /// @dev No deposit is recorded for this HTLC key.
-    error UnknownHtlc();
-    error InvalidDepositorSignature();
     /// @dev One of the arbitrary calls failed; carries its index in the batch.
     error CallFailed(uint256 index);
     error EtherTransferFailed();
+    /// @dev A sweep to address(0) would burn the balance (a native transfer
+    ///      there succeeds); a signed or recorded zero destination is a bug.
+    error ZeroDestination();
     /// @dev The call targets a contract calls must never touch (HTLC, self, Permit2).
     error RestrictedTarget(address target);
     /// @dev The calldata starts with a transferFrom-family selector that could
@@ -77,18 +65,12 @@ contract HTLCCoordinator {
     HTLCErc20 public immutable HTLC;
     ISignatureTransfer public immutable PERMIT2;
 
-    // -- Storage --
-
-    /// @dev Maps HTLC swap key -> original depositor address.
-    ///      Populated by executeAndCreate, used by refundTo / collabRefundAndExecute.
-    mapping(SwapKey => address) public deposits;
-
     // -- Reentrancy guard via transient storage (EIP-1153) --
 
     modifier nonReentrant() {
         assembly ("memory-safe") {
             if tload(0) {
-                mstore(0, 0x37ed32e8) // Reentrancy()
+                mstore(0, 0xab143c06) // Reentrancy()
                 revert(0x1c, 0x04)
             }
             tstore(0, 1)
@@ -109,10 +91,12 @@ contract HTLCCoordinator {
     // -- External functions --
 
     /// @notice Pull tokens from depositor via Permit2, execute arbitrary calls, then
-    ///         lock the resulting balance in an HTLC with the coordinator as sender
-    /// @dev The coordinator becomes the HTLC sender (depositor tracking enabled).
-    ///      If the swap expires, refundTo is permissionless but always sends the
-    ///      tokens to the depositor.
+    ///         lock the resulting balance in an HTLC with the depositor as sender
+    /// @dev The depositor is the HTLC's refund address, so the swap key carries the
+    ///      depositor, not this contract: `redeemAndExecute` is passed the depositor as
+    ///      `htlcSender`, and any refund is the depositor's own call on the HTLC. The
+    ///      Permit2 witness binds `refundAddress = depositor`, so the signer consents to
+    ///      exactly that.
     /// @param calls        Arbitrary calls to execute (e.g. DEX swap)
     /// @param preimageHash SHA-256 preimage hash for the HTLC
     /// @param token        Output ERC20 token to lock in the HTLC (e.g. WBTC after a USDC→WBTC swap).
@@ -132,9 +116,7 @@ contract HTLCCoordinator {
         ISignatureTransfer.PermitTransferFrom calldata permit,
         bytes calldata signature
     ) external nonReentrant {
-        _permit2Transfer(
-            token, preimageHash, claimAddress, address(this), timelock, calls, depositor, permit, signature
-        );
+        _permit2Transfer(token, preimageHash, claimAddress, depositor, timelock, calls, depositor, permit, signature);
 
         _executeCalls(calls);
 
@@ -142,10 +124,7 @@ contract HTLCCoordinator {
         if (balance == 0) revert InsufficientBalance();
 
         IERC20(token).forceApprove(address(HTLC), balance);
-        HTLC.create(preimageHash, balance, token, claimAddress, timelock);
-
-        SwapKey key = HTLC.computeKey(preimageHash, balance, token, address(this), claimAddress, timelock);
-        deposits[key] = depositor;
+        HTLC.create(preimageHash, balance, token, depositor, claimAddress, timelock);
     }
 
     /// @notice Redeem tokens from an HTLC via EIP-712 signature, execute arbitrary
@@ -158,7 +137,8 @@ contract HTLCCoordinator {
     /// @param preimage     Secret that SHA-256 hashes to the HTLC's preimageHash
     /// @param amount       Token amount locked in the HTLC
     /// @param token        ERC20 token locked in the HTLC
-    /// @param htlcSender   Address that created the HTLC
+    /// @param htlcSender   The HTLC's sender / refund address (the depositor, for a swap
+    ///                     created through this coordinator)
     /// @param timelock     Timelock set at HTLC creation
     /// @param calls        Arbitrary calls to execute after redeem (e.g. DEX swap)
     /// @param sweepToken   Token to sweep to the destination (address(0) for ETH)
@@ -192,122 +172,6 @@ contract HTLCCoordinator {
         _sweep(destination, sweepToken, minAmountOut);
     }
 
-    /// @notice Refund an expired coordinator-created HTLC and send the locked
-    ///         token directly to the original depositor (no swap-back)
-    /// @dev Permissionless — anyone can trigger this after timelock expiry.
-    ///      Tokens always go to the depositor regardless of who calls.
-    /// @param preimageHash The preimage hash used at HTLC creation
-    /// @param amount       Token amount locked in the HTLC
-    /// @param token        ERC20 token locked in the HTLC
-    /// @param claimAddress Claim address set at HTLC creation
-    /// @param timelock     Timelock set at HTLC creation
-    function refundTo(
-        bytes32 preimageHash,
-        uint256 amount,
-        address token,
-        address claimAddress,
-        uint256 timelock
-    ) external nonReentrant {
-        SwapKey key = HTLC.computeKey(preimageHash, amount, token, address(this), claimAddress, timelock);
-        address depositor = deposits[key];
-        if (depositor == address(0)) revert UnknownHtlc();
-
-        delete deposits[key];
-
-        HTLC.refund(preimageHash, amount, token, claimAddress, timelock, depositor);
-    }
-
-    /// @notice Collaboratively refund a coordinator-created HTLC before timelock expiry,
-    ///         execute arbitrary calls (e.g. fee skim + DEX swap), then sweep to depositor
-    /// @dev Requires TWO signatures:
-    ///      - Depositor EIP-712 sig (coordinator-level, authorizes refund params)
-    ///      - ClaimAddress EIP-712 sig (HTLC-level, waives timelock via refundBySig)
-    ///      Anyone can submit the transaction (gasless for both parties).
-    /// @param preimageHash The preimage hash used at HTLC creation
-    /// @param amount       Token amount locked in the HTLC
-    /// @param token        ERC20 token locked in the HTLC
-    /// @param claimAddress Claim address set at HTLC creation
-    /// @param timelock     Timelock set at HTLC creation
-    /// @param calls        Arbitrary calls to execute after refund (e.g. fee skim + DEX swap)
-    /// @param sweepToken   Token to sweep to the depositor (address(0) for ETH)
-    /// @param minAmountOut Minimum balance required before sweeping
-    /// @param depositorV   ECDSA recovery id (depositor's coordinator-level signature)
-    /// @param depositorR   ECDSA signature component (depositor's coordinator-level signature)
-    /// @param depositorS   ECDSA signature component (depositor's coordinator-level signature)
-    /// @param claimV       ECDSA recovery id (claimAddress's HTLC-level refundBySig signature)
-    /// @param claimR       ECDSA signature component (claimAddress's HTLC-level refundBySig signature)
-    /// @param claimS       ECDSA signature component (claimAddress's HTLC-level refundBySig signature)
-    function collabRefundAndExecute(
-        bytes32 preimageHash,
-        uint256 amount,
-        address token,
-        address claimAddress,
-        uint256 timelock,
-        Call[] calldata calls,
-        address sweepToken,
-        uint256 minAmountOut,
-        uint8 depositorV,
-        bytes32 depositorR,
-        bytes32 depositorS,
-        uint8 claimV,
-        bytes32 claimR,
-        bytes32 claimS
-    ) external nonReentrant {
-        // 1. Look up depositor from coordinator's mapping
-        SwapKey key = HTLC.computeKey(preimageHash, amount, token, address(this), claimAddress, timelock);
-        address depositor = deposits[key];
-        if (depositor == address(0)) revert UnknownHtlc();
-
-        // 2. Verify depositor's EIP-712 signature (coordinator-level)
-        {
-            bytes32 callsHash = _computeCallsHash(calls);
-            bytes32 structHash = keccak256(
-                abi.encode(
-                    TYPEHASH_COLLAB_REFUND,
-                    preimageHash,
-                    amount,
-                    token,
-                    claimAddress,
-                    timelock,
-                    msg.sender,
-                    sweepToken,
-                    minAmountOut,
-                    callsHash
-                )
-            );
-            bytes32 digest = keccak256(abi.encodePacked("\x19\x01", DOMAIN_SEPARATOR, structHash));
-            address recovered = ecrecover(digest, depositorV, depositorR, depositorS);
-            if (recovered != depositor) revert InvalidDepositorSignature();
-        }
-
-        // 3. Clear the deposit record
-        delete deposits[key];
-
-        // 4. Call HTLC.refundBySig with the claimAddress's signature
-        //    This recovers claimAddress, verifies the swap, deletes it, and sends tokens here
-        HTLC.refundBySig(
-            preimageHash,
-            amount,
-            token,
-            address(this),
-            timelock,
-            depositor,
-            sweepToken,
-            minAmountOut,
-            claimV,
-            claimR,
-            claimS
-        );
-
-        // 5. Execute calls (fee skim, DEX swap, etc.)
-        if (calls.length > 0) {
-            _executeCalls(calls);
-        }
-
-        // 6. Sweep result to depositor
-        _sweep(depositor, sweepToken, minAmountOut);
-    }
-
     // -- Internal helpers --
 
     function _executeCalls(Call[] calldata calls) internal {
@@ -323,6 +187,8 @@ contract HTLCCoordinator {
     }
 
     function _sweep(address destination, address token, uint256 minAmountOut) internal {
+        if (destination == address(0)) revert ZeroDestination();
+
         uint256 balance;
         if (token == address(0)) {
             balance = address(this).balance;

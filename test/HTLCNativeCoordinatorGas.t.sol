@@ -38,7 +38,7 @@ contract HTLCNativeCoordinatorGasTest is NativeCoordinatorFixture {
             _signRedeem(bobPk, address(coordinator), bob, address(0), amount, _callsHash(noCalls));
         vm.prank(relayer);
         coordinator.redeemAndExecute(
-            preimage, amount, address(coordinator), timelock, noCalls, address(0), amount, bob, v, r, s
+            preimage, amount, alice, timelock, noCalls, address(0), amount, bob, v, r, s
         );
         vm.snapshotGasLastCall("redeemAndExecute_0calls");
     }
@@ -46,7 +46,7 @@ contract HTLCNativeCoordinatorGasTest is NativeCoordinatorFixture {
     function test_gas_directRedeem() public {
         _lock();
         vm.prank(bob);
-        htlc.redeem(preimage, amount, address(coordinator), timelock);
+        htlc.redeem(preimage, amount, alice, timelock);
         vm.snapshotGasLastCall("htlcNative_redeem_direct");
     }
 }

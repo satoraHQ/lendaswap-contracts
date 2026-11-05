@@ -9,8 +9,8 @@
 //! 1. `test_lock_and_execute`    — `executeAndCreateWithPermit2`: swap USDC→WBTC via DEX, lock WBTC
 //!    in HTLC
 //! 2. `test_claim`               — Bob redeems the HTLC with the preimage
-//! 3. `test_refund_to`           — `refundTo`: after timelock, anyone sends WBTC directly to
-//!    depositor
+//! 3. `test_depositor_refunds`   — after the timelock Alice, the HTLC sender, refunds straight on
+//!    the HTLC; a stranger cannot
 //!
 //! Run:
 //!   cargo test --test e2e_coordinator -- --nocapture
@@ -168,7 +168,7 @@ async fn sign_permit2(
             preimage_hash,
             output_token,
             claim_address,
-            coordinator_addr,
+            depositor_key.address(), // refundAddress: the depositor is the HTLC sender
             timelock,
             calls_hash,
         )
@@ -418,7 +418,7 @@ async fn test_lock_and_execute() -> Result<()> {
             preimage_hash,
             U256::from(EXPECTED_WBTC),
             *wbtc.address(),
-            *coordinator.address(),
+            alice_address,
             bob_address,
             timelock,
         )
@@ -605,7 +605,7 @@ async fn test_claim() -> Result<()> {
             preimage,
             U256::from(EXPECTED_WBTC),
             *wbtc.address(),
-            *coordinator.address(),
+            alice_address,
             timelock,
         )
         .send()
@@ -645,7 +645,7 @@ async fn test_claim() -> Result<()> {
             preimage_hash,
             U256::from(EXPECTED_WBTC),
             *wbtc.address(),
-            *coordinator.address(),
+            alice_address,
             bob_address,
             timelock,
         )
@@ -658,9 +658,9 @@ async fn test_claim() -> Result<()> {
     Ok(())
 }
 
-/// 3. Refund the WBTC: after timelock, send WBTC directly to Alice
+/// 3. Refund the WBTC: after the timelock Alice refunds on the HTLC herself
 #[tokio::test]
-async fn test_refund_to() -> Result<()> {
+async fn test_depositor_refunds() -> Result<()> {
     let anvil = Anvil::new().block_time(1).try_spawn()?;
     let endpoint = anvil.endpoint_url();
 
@@ -806,10 +806,25 @@ async fn test_refund_to() -> Result<()> {
         .raw_request::<_, serde_json::Value>("evm_mine".into(), Vec::<u64>::new())
         .await?;
 
-    // Charlie triggers refundTo (permissionless)
-    let coordinator_charlie = HTLCCoordinator::new(*coordinator.address(), &charlie_provider);
-    let receipt = coordinator_charlie
-        .refundTo(
+    // Charlie is not the sender: his refund addresses a key that does not exist
+    let charlie_refund = HTLCErc20::new(*htlc.address(), &charlie_provider)
+        .refund_0(
+            preimage_hash,
+            U256::from(EXPECTED_WBTC),
+            *wbtc.address(),
+            bob_address,
+            timelock,
+        )
+        .send()
+        .await;
+    assert!(
+        charlie_refund.is_err(),
+        "a stranger must not be able to refund"
+    );
+
+    // Alice is the HTLC sender; she refunds straight on the HTLC
+    let receipt = HTLCErc20::new(*htlc.address(), &alice_provider)
+        .refund_0(
             preimage_hash,
             U256::from(EXPECTED_WBTC),
             *wbtc.address(),
@@ -820,7 +835,7 @@ async fn test_refund_to() -> Result<()> {
         .await?
         .get_receipt()
         .await?;
-    assert!(receipt.status(), "refundTo should succeed");
+    assert!(receipt.status(), "refund should succeed");
 
     // Verify: HTLC empty
     let htlc_balance = IERC20::new(*wbtc.address(), &alice_provider)
@@ -846,7 +861,7 @@ async fn test_refund_to() -> Result<()> {
             preimage_hash,
             U256::from(EXPECTED_WBTC),
             *wbtc.address(),
-            *coordinator.address(),
+            alice_address,
             bob_address,
             timelock,
         )
@@ -854,6 +869,6 @@ async fn test_refund_to() -> Result<()> {
         .await?;
     assert!(!is_active, "swap should no longer be active");
 
-    println!("test_refund_to passed");
+    println!("test_depositor_refunds passed");
     Ok(())
 }

@@ -157,7 +157,11 @@ contract HTLCNativeDomainTest is Test {
         // Same contract address and name, but the domain of a different chain.
         bytes32 foreignDomain = keccak256(
             abi.encode(
-                EIP712_DOMAIN_TYPEHASH, keccak256("HTLCNative"), keccak256("1"), block.chainid + 1, address(htlc)
+                EIP712_DOMAIN_TYPEHASH,
+                keccak256("HTLCNative"),
+                keccak256(bytes(vm.toString(uint256(htlc.VERSION())))),
+                block.chainid + 1,
+                address(htlc)
             )
         );
         assertTrue(foreignDomain != htlc.DOMAIN_SEPARATOR(), "chainId is part of the domain");
@@ -203,7 +207,13 @@ contract HTLCNativeDomainTest is Test {
 
         vm.chainId(block.chainid + 1);
         bytes32 newChainDomain = keccak256(
-            abi.encode(EIP712_DOMAIN_TYPEHASH, keccak256("HTLCNative"), keccak256("1"), block.chainid, address(htlc))
+            abi.encode(
+                EIP712_DOMAIN_TYPEHASH,
+                keccak256("HTLCNative"),
+                keccak256(bytes(vm.toString(uint256(htlc.VERSION())))),
+                block.chainid,
+                address(htlc)
+            )
         );
         (uint8 v, bytes32 r, bytes32 s) = _signNative(newChainDomain, relayer);
 
@@ -260,13 +270,13 @@ contract HTLCNativeDomainTest is Test {
         assertEq(claimant, 0x7564105E977516C53bE337314c7E53838967bDaC, "claimant");
         assertEq(
             fixture.DOMAIN_SEPARATOR(),
-            0x400206cb0820bd4ff421a2f95ff4f4199e46931c64ac13274b01390bf285648a,
+            0x1c9fb995b3c88f27a230057d6506e0ee2cc01e0fa343ddf8686ec40de9a8cca2,
             "domain separator"
         );
-        assertEq(digest, 0x1397895b4d20525c9ecb07e36978478ad900e12dec0c63474100b53407416c09, "digest");
+        assertEq(digest, 0xac9ed08bcc1fe72a670f9a87a5da9c7d99a4316f2be3031b32b30df9b01ee636, "digest");
         assertEq(v, 27, "v");
-        assertEq(r, 0xc4c95466427c3cb06f1fe5787ba79e0d6fca9a3f0b63db8f0fe1778c23c233e6, "r");
-        assertEq(s, 0x1dc3d44c7270f846d8093cac1c2641c51ed02c3e26e546ab49c383a21223fbf1, "s");
+        assertEq(r, 0xe1dd1fad6f404ecaaa4ba9ce36afdba8e99a514a23e7a745157bfc38c2f01f16, "r");
+        assertEq(s, 0x06f6b85450b1b97dd3a762dfba22d3cec5642968382f32fed3882b31da024e45, "s");
 
         // The vector settles: lock under the fixture's terms and submit it as `coordinator`.
         // (The sha256 precompile is a call and would consume the prank if inlined.)
@@ -306,5 +316,54 @@ contract HTLCNativeDomainTest is Test {
         );
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", domainSeparator, structHash));
         (v, r, s) = vm.sign(bobPk, digest);
+    }
+
+    /// The `Refund` digest the contract verifies in `refundBySig`, under fixed terms
+    /// on chain 30 at a fixed address. The backend's off-chain encoder pins the same
+    /// digest (`swap/src/api/collab_refund_evm.rs`).
+    function test_refundDigestVector() public {
+        vm.chainId(30);
+        address at = 0x1000000000000000000000000000000000000001;
+        deployCodeTo("HTLCNative.sol:HTLCNative", abi.encode(address(this)), at);
+        HTLCNative fixture = HTLCNative(at);
+
+        bytes32 preimageHash = bytes32(uint256(0x1111111111111111111111111111111111111111111111111111111111111111));
+        uint256 amount = 100_000_000;
+        address sender = 0x3333333333333333333333333333333333333333;
+        uint256 timelock = 1_800_000_000;
+
+        bytes32 structHash = keccak256(abi.encode(fixture.TYPEHASH_REFUND(), preimageHash, amount, sender, timelock));
+        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", fixture.DOMAIN_SEPARATOR(), structHash));
+        assertEq(fixture.VERSION(), 2, "vector pinned for v2");
+        assertEq(
+            fixture.DOMAIN_SEPARATOR(),
+            0x1c9fb995b3c88f27a230057d6506e0ee2cc01e0fa343ddf8686ec40de9a8cca2,
+            "domain separator"
+        );
+        assertEq(digest, 0xa8e3d1917c9e493c12d106d1caae2af58413bba3905dc940c466ef52ad748e84, "digest");
+    }
+
+    /// The `Rehash` digest the contract verifies in `rehash`, under the same fixed terms
+    /// moving to a fixed new hash and timelock. Pinned by the backend's encoder in
+    /// `swap/src/api/rehash_evm.rs`.
+    function test_rehashDigestVector() public {
+        vm.chainId(30);
+        address at = 0x1000000000000000000000000000000000000001;
+        deployCodeTo("HTLCNative.sol:HTLCNative", abi.encode(address(this)), at);
+        HTLCNative fixture = HTLCNative(at);
+
+        bytes32 preimageHash = bytes32(uint256(0x1111111111111111111111111111111111111111111111111111111111111111));
+        uint256 amount = 100_000_000;
+        address sender = 0x3333333333333333333333333333333333333333;
+        uint256 timelock = 1_800_000_000;
+        bytes32 newPreimageHash = bytes32(uint256(0x4444444444444444444444444444444444444444444444444444444444444444));
+        uint256 newTimelock = 1_800_007_200;
+
+        bytes32 structHash = keccak256(
+            abi.encode(fixture.TYPEHASH_REHASH(), preimageHash, amount, sender, timelock, newPreimageHash, newTimelock)
+        );
+        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", fixture.DOMAIN_SEPARATOR(), structHash));
+        assertEq(fixture.VERSION(), 2, "vector pinned for v2");
+        assertEq(digest, 0x26634d5ccd7e33ff7295f11837232efe2de59bd0bd122631326633fe007c973e, "digest");
     }
 }

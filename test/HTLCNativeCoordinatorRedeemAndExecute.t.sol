@@ -20,12 +20,11 @@ contract HTLCNativeCoordinatorRedeemAndExecuteTest is NativeCoordinatorFixture {
         assertEq(uint8(state), uint8(HTLCNative.SwapState.Redeemed), "redeemed");
         assertEq(revealed, preimage, "preimage stored");
         assertEq(address(coordinator).balance, 0, "coordinator empty");
-        assertEq(coordinator.deposits(_key(amount)), address(0), "deposit record cleared on redeem");
     }
 
-    function test_redeemOfDirectlyCreatedSwap_leavesDepositsAlone() public {
-        // A swap Alice created straight on the HTLC has no deposit record; the
-        // coordinator must not touch the mapping when settling it.
+    function test_redeemOfDirectlyCreatedSwap() public {
+        // A swap Alice created straight on the HTLC has the same key shape as one
+        // created through the coordinator, so the coordinator settles it the same way.
         bytes32 h2 = sha256(abi.encodePacked(bytes32(uint256(0xcafe))));
         vm.prank(alice);
         htlc.create{value: amount}(h2, bob, timelock);
@@ -35,7 +34,7 @@ contract HTLCNativeCoordinatorRedeemAndExecuteTest is NativeCoordinatorFixture {
             bytes32(uint256(0xcafe)), amount, alice, timelock, noCalls, address(0), amount, bob, v, r, s
         );
         assertEq(bob.balance, amount, "bob paid");
-        assertEq(coordinator.deposits(_key(amount)), alice, "unrelated deposit record intact");
+        assertTrue(_isActive(amount), "the other lock is untouched");
     }
 
     /// Bob's signature for a swap with an explicit preimage and HTLC sender.
@@ -90,7 +89,7 @@ contract HTLCNativeCoordinatorRedeemAndExecuteTest is NativeCoordinatorFixture {
         vm.prank(relayer);
         vm.expectRevert(CallExecutor.ZeroDestination.selector);
         coordinator.redeemAndExecute(
-            preimage, amount, address(coordinator), timelock, noCalls, address(0), amount, address(0), v, r, s
+            preimage, amount, alice, timelock, noCalls, address(0), amount, address(0), v, r, s
         );
         assertTrue(_isActive(amount), "swap untouched");
     }
@@ -101,7 +100,7 @@ contract HTLCNativeCoordinatorRedeemAndExecuteTest is NativeCoordinatorFixture {
         vm.prank(relayer);
         vm.expectRevert(CallExecutor.InsufficientBalance.selector);
         coordinator.redeemAndExecute(
-            preimage, amount, address(coordinator), timelock, noCalls, address(0), amount + 1, bob, v, r, s
+            preimage, amount, alice, timelock, noCalls, address(0), amount + 1, bob, v, r, s
         );
     }
 
@@ -112,7 +111,7 @@ contract HTLCNativeCoordinatorRedeemAndExecuteTest is NativeCoordinatorFixture {
         vm.prank(relayer);
         vm.expectPartialRevert(HTLCNative.SwapNotActive.selector);
         coordinator.redeemAndExecute(
-            preimage, amount, address(coordinator), timelock, noCalls, address(0), amount, relayer, v, r, s
+            preimage, amount, alice, timelock, noCalls, address(0), amount, relayer, v, r, s
         );
         assertTrue(_isActive(amount), "swap untouched");
     }
@@ -124,7 +123,7 @@ contract HTLCNativeCoordinatorRedeemAndExecuteTest is NativeCoordinatorFixture {
         vm.prank(relayer);
         vm.expectPartialRevert(HTLCNative.SwapNotActive.selector);
         coordinator.redeemAndExecute(
-            preimage, amount, address(coordinator), timelock, calls, address(0), amount, bob, v, r, s
+            preimage, amount, alice, timelock, calls, address(0), amount, bob, v, r, s
         );
         assertTrue(_isActive(amount), "swap untouched");
     }
@@ -136,7 +135,7 @@ contract HTLCNativeCoordinatorRedeemAndExecuteTest is NativeCoordinatorFixture {
         vm.prank(relayer);
         vm.expectPartialRevert(HTLCNative.SwapNotActive.selector);
         coordinator.redeemAndExecute(
-            preimage, amount, address(coordinator), timelock, noCalls, address(0), amount, bob, v, r, s
+            preimage, amount, alice, timelock, noCalls, address(0), amount, bob, v, r, s
         );
     }
 
@@ -147,7 +146,7 @@ contract HTLCNativeCoordinatorRedeemAndExecuteTest is NativeCoordinatorFixture {
             _signRedeem(bobPk, address(coordinator), bob, address(0), amount, _callsHash(noCalls));
         vm.prank(stranger);
         coordinator.redeemAndExecute(
-            preimage, amount, address(coordinator), timelock, noCalls, address(0), amount, bob, v, r, s
+            preimage, amount, alice, timelock, noCalls, address(0), amount, bob, v, r, s
         );
         assertEq(bob.balance, amount, "bob paid");
         assertEq(stranger.balance, 1 ether, "stranger gained nothing");
@@ -167,7 +166,7 @@ contract HTLCNativeCoordinatorRedeemAndExecuteTest is NativeCoordinatorFixture {
             _signRedeem(bobPk, address(coordinator), bob, address(wrbtc), amount, _callsHash(calls));
         vm.prank(relayer);
         coordinator.redeemAndExecute{value: 0.1 ether}(
-            preimage, amount, address(coordinator), timelock, calls, address(wrbtc), amount, bob, v, r, s
+            preimage, amount, alice, timelock, calls, address(wrbtc), amount, bob, v, r, s
         );
         assertEq(wrbtc.balanceOf(bob), amount + 0.1 ether, "bob received the topped-up wrap");
         assertEq(relayer.balance, 0.9 ether, "relayer paid the top-up");
@@ -182,14 +181,14 @@ contract HTLCNativeCoordinatorRedeemAndExecuteTest is NativeCoordinatorFixture {
             abi.encodeWithSelector(HTLCNative.SwapNotActive.selector, _key(amount), HTLCNative.SwapState.Redeemed)
         );
         coordinator.redeemAndExecute(
-            preimage, amount, address(coordinator), timelock, noCalls, address(0), amount, bob, v, r, s
+            preimage, amount, alice, timelock, noCalls, address(0), amount, bob, v, r, s
         );
     }
 
     function test_directRedeemOnHtlc_stillWorksForBob() public {
         // The coordinator is the sender; Bob may bypass it entirely.
         vm.prank(bob);
-        htlc.redeem(preimage, amount, address(coordinator), timelock);
+        htlc.redeem(preimage, amount, alice, timelock);
         assertEq(bob.balance, amount, "bob claimed directly");
     }
 }

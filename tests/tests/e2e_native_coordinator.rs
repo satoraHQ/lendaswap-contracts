@@ -6,8 +6,8 @@
 //!    `redeemAndExecute` and Bob is paid the native coin.
 //! 2. `test_lock_then_wrapped_redeem` — same lock; the redeem wraps the coin and sweeps the ERC20
 //!    to Bob.
-//! 3. `test_lock_then_refund_to` — after the timelock a stranger calls `refundTo` and Alice is paid
-//!    back.
+//! 3. `test_lock_then_depositor_refunds` — after the timelock Alice, the HTLC sender, refunds
+//!    straight on the HTLC; a stranger cannot.
 //!
 //! The `sol!` bindings and the signing helper are the pattern the backend reuses.
 //!
@@ -148,7 +148,7 @@ impl Harness {
                 self.preimage_hash,
                 U256::from(AMOUNT),
                 Address::ZERO,
-                self.coordinator,
+                self.alice.address(),
                 self.bob.address(),
                 self.timelock,
             )
@@ -159,7 +159,8 @@ impl Harness {
         Ok(())
     }
 
-    /// Bob's HTLC-level redeem signature: caller = coordinator, plus the sweep terms.
+    /// Bob's HTLC-level redeem signature: sender = Alice, caller = coordinator, plus the sweep
+    /// terms.
     async fn sign_redeem(
         &self,
         destination: Address,
@@ -177,7 +178,7 @@ impl Harness {
                 typehash,
                 self.preimage,
                 U256::from(AMOUNT),
-                self.coordinator,
+                self.alice.address(),
                 self.timelock,
                 self.coordinator,
                 destination,
@@ -230,7 +231,7 @@ async fn test_lock_then_redeem_via_coordinator() -> Result<()> {
         .redeemAndExecute(
             h.preimage,
             U256::from(AMOUNT),
-            h.coordinator,
+            h.alice.address(),
             h.timelock,
             vec![],
             Address::ZERO,
@@ -261,7 +262,7 @@ async fn test_lock_then_redeem_via_coordinator() -> Result<()> {
             h.preimage_hash,
             U256::from(AMOUNT),
             Address::ZERO,
-            h.coordinator,
+            h.alice.address(),
             h.bob.address(),
             h.timelock,
         )
@@ -292,7 +293,7 @@ async fn test_lock_then_wrapped_redeem() -> Result<()> {
         .redeemAndExecute(
             h.preimage,
             U256::from(AMOUNT),
-            h.coordinator,
+            h.alice.address(),
             h.timelock,
             calls,
             h.wrbtc,
@@ -318,16 +319,30 @@ async fn test_lock_then_wrapped_redeem() -> Result<()> {
 }
 
 #[tokio::test]
-async fn test_lock_then_refund_to() -> Result<()> {
+async fn test_lock_then_depositor_refunds() -> Result<()> {
     let h = Harness::spawn().await?;
     h.lock().await?;
-    let alice_after_lock = h.raw.get_balance(h.alice.address()).await?;
 
     h.warp_past_timelock().await?;
 
-    let coordinator = HTLCNativeCoordinator::new(h.coordinator, h.provider_for(&h.relayer));
-    let receipt = coordinator
-        .refundTo(
+    // The relayer is not the sender: its refund addresses a key that does not exist.
+    let stranger_refund = HTLCNative::new(h.htlc, h.provider_for(&h.relayer))
+        .refund_1(
+            h.preimage_hash,
+            U256::from(AMOUNT),
+            h.bob.address(),
+            h.timelock,
+        )
+        .send()
+        .await;
+    assert!(
+        stranger_refund.is_err(),
+        "a stranger must not be able to refund"
+    );
+
+    let alice_before = h.raw.get_balance(h.alice.address()).await?;
+    let receipt = HTLCNative::new(h.htlc, h.provider_for(&h.alice))
+        .refund_1(
             h.preimage_hash,
             U256::from(AMOUNT),
             h.bob.address(),
@@ -337,32 +352,15 @@ async fn test_lock_then_refund_to() -> Result<()> {
         .await?
         .get_receipt()
         .await?;
-    assert!(receipt.status(), "refundTo reverted");
+    assert!(receipt.status(), "refund reverted");
 
-    let alice_after_refund = h.raw.get_balance(h.alice.address()).await?;
+    let alice_after = h.raw.get_balance(h.alice.address()).await?;
+    let gas_paid = U256::from(receipt.gas_used) * U256::from(receipt.effective_gas_price);
     assert_eq!(
-        alice_after_refund - alice_after_lock,
+        alice_after + gas_paid - alice_before,
         U256::from(AMOUNT),
-        "stranger's refundTo pays Alice"
+        "Alice is paid back on the HTLC"
     );
     assert_eq!(h.raw.get_balance(h.htlc).await?, U256::ZERO);
-
-    let deposit = coordinator
-        .deposits(
-            HTLCNative::new(h.htlc, h.raw.clone())
-                .computeKey(
-                    h.preimage_hash,
-                    U256::from(AMOUNT),
-                    Address::ZERO,
-                    h.coordinator,
-                    h.bob.address(),
-                    h.timelock,
-                )
-                .call()
-                .await?,
-        )
-        .call()
-        .await?;
-    assert_eq!(deposit, Address::ZERO, "deposit cleared");
     Ok(())
 }

@@ -9,8 +9,8 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 
 /// @notice A swap's storage key: keccak256 over all six swap parameters (see
 ///         `HTLCErc20.computeKey`). One key identifies one swap everywhere —
-///         it indexes `swaps` and `preimages` here and the coordinator's
-///         `deposits`, and is the identifier carried by every lifecycle event.
+///         it indexes `swaps` and `preimages` here and is the identifier carried
+///         by every lifecycle event.
 type SwapKey is bytes32;
 
 /// @title HTLCErc20
@@ -30,7 +30,7 @@ type SwapKey is bytes32;
 contract HTLCErc20 is Ownable2Step {
     using SafeERC20 for IERC20;
 
-    uint8 public constant VERSION = 6;
+    uint8 public constant VERSION = 7;
 
     // -- EIP-712 --
     //
@@ -41,15 +41,18 @@ contract HTLCErc20 is Ownable2Step {
         "Redeem(bytes32 preimage,uint256 amount,address token,address sender,uint256 timelock,address caller,address destination,address sweepToken,uint256 minAmountOut,bytes32 callsHash)"
     );
 
-    bytes32 public constant TYPEHASH_REFUND = keccak256(
-        "Refund(bytes32 preimageHash,uint256 amount,address token,address refundAddress,uint256 timelock,address caller,address destination,address sweepToken,uint256 minAmountOut)"
+    bytes32 public constant TYPEHASH_REFUND =
+        keccak256("Refund(bytes32 preimageHash,uint256 amount,address token,address sender,uint256 timelock)");
+
+    bytes32 public constant TYPEHASH_REHASH = keccak256(
+        "Rehash(bytes32 preimageHash,uint256 amount,address token,address sender,uint256 timelock,bytes32 newPreimageHash,uint256 newTimelock)"
     );
 
     bytes32 public immutable DOMAIN_SEPARATOR = keccak256(
         abi.encode(
             keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
             keccak256("HTLCErc20"),
-            keccak256("6"),
+            keccak256("7"),
             block.chainid,
             address(this)
         )
@@ -67,11 +70,13 @@ contract HTLCErc20 is Ownable2Step {
     error TimelockTooSoon();
     /// @dev …and must have passed before a unilateral refund.
     error TimelockNotExpired();
+    /// @dev A rehash may extend the timelock but never shorten it: the claim side keeps
+    ///      at least the window it was promised at creation.
+    error TimelockShortened();
     /// @dev Recovery found no balance beyond what active swaps are owed.
     error NoExcess();
     error EtherTransferFailed();
     error OwnershipRequired();
-    error Unimplemented();
 
     /// @dev Settlement needs the key Active; the state names which lifecycle
     ///      stage the swap is actually in (None = never created, or already
@@ -85,12 +90,15 @@ contract HTLCErc20 is Ownable2Step {
     // -- State --
 
     /// @notice Lifecycle of a swap. Terminal states are never deleted, so a key's
-    ///         history stays readable from storage forever.
+    ///         history stays readable from storage forever. Rehashed is terminal for
+    ///         the key, not for the lock: the tokens live on under the new key named
+    ///         by the `SwapRehashed` event.
     enum SwapState {
         None,
         Active,
         Redeemed,
-        Refunded
+        Refunded,
+        Rehashed
     }
 
     /// @dev Swap lifecycle state, by swap key. A key that ever reached a terminal
@@ -127,6 +135,11 @@ contract HTLCErc20 is Ownable2Step {
 
     event SwapRefunded(bytes32 indexed preimageHash, SwapKey indexed key);
 
+    /// @dev The lock under `key` continues under `newKey` with a new hash and timelock;
+    ///      amount, token, sender and claimAddress are unchanged. No `SwapCreated` is
+    ///      emitted for `newKey` — this is the only record of its origin.
+    event SwapRehashed(bytes32 indexed preimageHash, SwapKey indexed key, SwapKey indexed newKey, bytes32 newPreimageHash);
+
     event ExcessTokenRecovered(address indexed token, address indexed to, uint256 amount);
 
     event EtherRecovered(address indexed to, uint256 amount);
@@ -140,7 +153,7 @@ contract HTLCErc20 is Ownable2Step {
     modifier nonReentrant() {
         assembly ("memory-safe") {
             if tload(0) {
-                mstore(0, 0x37ed32e8) // Reentrancy()
+                mstore(0, 0xab143c06) // Reentrancy()
                 revert(0x1c, 0x04)
             }
             tstore(0, 1)
@@ -297,8 +310,32 @@ contract HTLCErc20 is Ownable2Step {
         address claimAddress,
         uint256 timelock
     ) external nonReentrant {
-        _refund(preimageHash, amount, token, claimAddress, timelock);
+        _refund(preimageHash, amount, token, msg.sender, claimAddress, timelock);
         IERC20(token).safeTransfer(msg.sender, amount);
+    }
+
+    /// @notice Refund an expired swap on the sender's behalf; the tokens go to the sender
+    /// @dev Permissionless: anyone may call once the timelock has passed, and the only
+    ///      thing the caller decides is to pay the gas. The key names `sender`, and the
+    ///      tokens can only go there, so a wrong `sender` addresses a swap that does not
+    ///      exist rather than redirecting one that does. Lets a service sweep expired
+    ///      locks back to depositors who cannot submit a transaction themselves.
+    /// @param preimageHash The preimage hash used at creation
+    /// @param amount Amount that was locked
+    /// @param token Token that was locked
+    /// @param sender Sender (refund address) that was set at creation; receives the tokens
+    /// @param claimAddress Claim address that was set at creation
+    /// @param timelock Timelock that was set at creation
+    function refundFor(
+        bytes32 preimageHash,
+        uint256 amount,
+        address token,
+        address sender,
+        address claimAddress,
+        uint256 timelock
+    ) external nonReentrant {
+        _refund(preimageHash, amount, token, sender, claimAddress, timelock);
+        IERC20(token).safeTransfer(sender, amount);
     }
 
     /// @notice Reclaim tokens after the timelock has expired, sending to a specified destination
@@ -318,23 +355,25 @@ contract HTLCErc20 is Ownable2Step {
         uint256 timelock,
         address destination
     ) external nonReentrant {
-        _refund(preimageHash, amount, token, claimAddress, timelock);
+        _refund(preimageHash, amount, token, msg.sender, claimAddress, timelock);
         IERC20(token).safeTransfer(destination, amount);
     }
 
-    /// @notice Refund tokens before timelock using an EIP-712 signature from the claimAddress
-    /// @dev The claimAddress signs to waive the timelock, enabling collaborative refunds.
-    ///      Anyone can call this function. The claimAddress is recovered from the signature.
-    ///      Tokens are sent to msg.sender (not the refund address or claimAddress).
-    ///      All execution parameters are cryptographically bound to the signature.
-    /// @param preimageHash The preimage hash used at creation (NOT the preimage — refunder doesn't know it)
+    /// @notice Refund before the timelock: the sender calls, the claimAddress signs
+    /// @dev Collaborative refund. Both parties consent — the sender by being msg.sender
+    ///      (exactly as in `refund`), the claimAddress by an EIP-712 signature over the
+    ///      swap terms with `sender = msg.sender`. The signature only waives the timelock;
+    ///      it moves nothing on its own. A claimAddress that signs and then calls with
+    ///      itself as sender addresses a key it never funded, so it cannot route the
+    ///      locked tokens to itself. Tokens go to msg.sender.
+    ///      No expiry on the signature, on purpose: it is bound to one key, and that key
+    ///      can leave Active exactly once, so every signature over it dies with the first
+    ///      settlement that lands.
+    /// @param preimageHash The preimage hash used at creation (not the preimage — the
+    ///                     sender does not know it)
     /// @param amount Amount that was locked
     /// @param token Token that was locked
-    /// @param refundAddress The original sender/refund address from HTLC creation
     /// @param timelock Timelock that was set at creation
-    /// @param destination Address where the caller intends to route tokens after refund
-    /// @param sweepToken Token the caller will sweep to destination (bound to signature)
-    /// @param minAmountOut Minimum amount of sweepToken required (bound to signature)
     /// @param v ECDSA recovery id
     /// @param r ECDSA signature component
     /// @param s ECDSA signature component
@@ -343,16 +382,95 @@ contract HTLCErc20 is Ownable2Step {
         bytes32 preimageHash,
         uint256 amount,
         address token,
-        address refundAddress,
         uint256 timelock,
-        address destination,
-        address sweepToken,
-        uint256 minAmountOut,
         uint8 v,
         bytes32 r,
         bytes32 s
     ) external nonReentrant returns (address claimAddress) {
-        revert Unimplemented();
+        {
+            bytes32 structHash =
+                keccak256(abi.encode(TYPEHASH_REFUND, preimageHash, amount, token, msg.sender, timelock));
+            bytes32 digest = keccak256(abi.encodePacked("\x19\x01", DOMAIN_SEPARATOR, structHash));
+            claimAddress = ECDSA.recover(digest, v, r, s);
+        }
+
+        SwapKey key = _key(preimageHash, amount, token, msg.sender, claimAddress, timelock);
+        SwapState state = swaps[key];
+        if (state != SwapState.Active) revert SwapNotActive(key, state);
+
+        swaps[key] = SwapState.Refunded;
+        lockedAmounts[token] -= amount;
+
+        emit SwapRefunded(preimageHash, key);
+
+        IERC20(token).safeTransfer(msg.sender, amount);
+    }
+
+    /// @notice Replace the hash lock and timelock of an active swap, keeping the tokens locked
+    /// @dev Collaborative rehash, consented to exactly like `refundBySig`: the sender by
+    ///      being msg.sender, the claimAddress by an EIP-712 signature over the old terms
+    ///      (with `sender = msg.sender`) and the new ones. Lets a swap whose far side
+    ///      failed (an unpayable Lightning invoice, say) be retried under a fresh hash
+    ///      without unwinding the lock. Nothing is transferred and `lockedAmounts` does
+    ///      not move: the old key becomes Rehashed and the new key Active, with the same
+    ///      amount, token, sender and claimAddress.
+    ///      The new timelock must lie in the future, as at creation, and must not be
+    ///      shorter than the current one: a rehash never shortens the timelock, so the
+    ///      claimAddress keeps at least the claim window it was promised, whatever it
+    ///      signed. Equal or later is accepted.
+    ///      No `SwapCreated` fires for the new key — consumers follow `SwapRehashed`.
+    ///      The new key is taken on a first-come basis like any other: a third party who
+    ///      learns the agreed terms can `create` under them first and make this call
+    ///      revert with `SwapExists`. That costs them a lock the claimAddress may redeem
+    ///      and leaves the original untouched, so the parties simply agree on fresh terms.
+    /// @param preimageHash The preimage hash used at creation
+    /// @param amount Amount that was locked
+    /// @param token Token that was locked
+    /// @param timelock Timelock that was set at creation
+    /// @param newPreimageHash Preimage hash the lock continues under
+    /// @param newTimelock Timelock the lock continues under
+    /// @param v ECDSA recovery id
+    /// @param r ECDSA signature component
+    /// @param s ECDSA signature component
+    /// @return claimAddress The address recovered from the signature
+    /// @return newKey The key the lock continues under
+    function rehash(
+        bytes32 preimageHash,
+        uint256 amount,
+        address token,
+        uint256 timelock,
+        bytes32 newPreimageHash,
+        uint256 newTimelock,
+        uint8 v,
+        bytes32 r,
+        bytes32 s
+    ) external nonReentrant returns (address claimAddress, SwapKey newKey) {
+        if (newTimelock <= block.timestamp) revert TimelockTooSoon();
+        if (newTimelock < timelock) revert TimelockShortened();
+
+        {
+            bytes32 structHash = keccak256(
+                abi.encode(
+                    TYPEHASH_REHASH, preimageHash, amount, token, msg.sender, timelock, newPreimageHash, newTimelock
+                )
+            );
+            bytes32 digest = keccak256(abi.encodePacked("\x19\x01", DOMAIN_SEPARATOR, structHash));
+            claimAddress = ECDSA.recover(digest, v, r, s);
+        }
+
+        SwapKey key = _key(preimageHash, amount, token, msg.sender, claimAddress, timelock);
+        SwapState state = swaps[key];
+        if (state != SwapState.Active) revert SwapNotActive(key, state);
+
+        newKey = _key(newPreimageHash, amount, token, msg.sender, claimAddress, newTimelock);
+        // Same rule as create: a settled key's terms are spent, an active one is taken.
+        SwapState newState = swaps[newKey];
+        if (newState != SwapState.None) revert SwapExists(newKey, newState);
+
+        swaps[key] = SwapState.Rehashed;
+        swaps[newKey] = SwapState.Active;
+
+        emit SwapRehashed(preimageHash, key, newKey, newPreimageHash);
     }
 
     // -- Owner functions --
@@ -440,12 +558,13 @@ contract HTLCErc20 is Ownable2Step {
         bytes32 preimageHash,
         uint256 amount,
         address token,
+        address sender,
         address claimAddress,
         uint256 timelock
     ) internal {
         if (block.timestamp < timelock) revert TimelockNotExpired();
 
-        SwapKey key = _key(preimageHash, amount, token, msg.sender, claimAddress, timelock);
+        SwapKey key = _key(preimageHash, amount, token, sender, claimAddress, timelock);
         SwapState state = swaps[key];
         if (state != SwapState.Active) revert SwapNotActive(key, state);
 

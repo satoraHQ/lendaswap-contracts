@@ -140,7 +140,7 @@ contract HTLCCoordinatorPermit2Test is Test {
         });
 
         // Witness uses the HTLC lock token (wbtc), not the Permit2 transfer token (usdc)
-        bytes32 witness = _computeWitness(preimageHash, address(wbtc), bob, address(coordinator), timelock, calls);
+        bytes32 witness = _computeWitness(preimageHash, address(wbtc), bob, alice, timelock, calls);
         bytes memory signature = _signPermit2WitnessTransfer(permit, witness, alicePk);
 
         // Relayer submits on behalf of Alice
@@ -150,19 +150,20 @@ contract HTLCCoordinatorPermit2Test is Test {
             calls, preimageHash, address(wbtc), bob, timelock, alice, permit, signature
         );
 
-        // Verify: HTLC created with coordinator as sender
+        // Verify: HTLC created with the depositor as sender
         assertTrue(
-            htlc.isActive(preimageHash, wbtcAmount, address(wbtc), address(coordinator), bob, timelock),
+            htlc.isActive(preimageHash, wbtcAmount, address(wbtc), alice, bob, timelock),
             "swap should be active"
         );
 
-        // Verify: depositor tracked
-        SwapKey key = htlc.computeKey(preimageHash, wbtcAmount, address(wbtc), address(coordinator), bob, timelock);
-        assertEq(coordinator.deposits(key), alice, "depositor should be alice");
+        assertFalse(
+            htlc.isActive(preimageHash, wbtcAmount, address(wbtc), address(coordinator), bob, timelock),
+            "no key under the coordinator"
+        );
 
         // Bob can redeem
         vm.prank(bob);
-        htlc.redeem(preimage, wbtcAmount, address(wbtc), address(coordinator), timelock);
+        htlc.redeem(preimage, wbtcAmount, address(wbtc), alice, timelock);
         assertEq(wbtc.balanceOf(bob), wbtcAmount, "bob should have 1 WBTC");
     }
 
@@ -184,8 +185,8 @@ contract HTLCCoordinatorPermit2Test is Test {
             deadline: block.timestamp + 1 hours
         });
 
-        // For depositor-tracking: refundAddress in witness = address(coordinator)
-        bytes32 witness = _computeWitness(preimageHash, address(wbtc), bob, address(coordinator), timelock, calls);
+        // refundAddress in the witness is the depositor
+        bytes32 witness = _computeWitness(preimageHash, address(wbtc), bob, alice, timelock, calls);
         bytes memory signature = _signPermit2WitnessTransfer(permit, witness, alicePk);
 
         address relayer = makeAddr("relayer");
@@ -195,16 +196,16 @@ contract HTLCCoordinatorPermit2Test is Test {
         );
 
         assertTrue(
-            htlc.isActive(preimageHash, wbtcAmount, address(wbtc), address(coordinator), bob, timelock),
+            htlc.isActive(preimageHash, wbtcAmount, address(wbtc), alice, bob, timelock),
             "swap should be active"
         );
     }
 
     // ---------------------------------------------------------------
-    // refundTo works with depositor-tracking variant
+    // The depositor refunds straight on the HTLC
     // ---------------------------------------------------------------
 
-    function test_permit2_refundTo_depositorTracking() public {
+    function test_permit2_depositorRefundsOnTheHtlc() public {
         vm.prank(alice);
         wbtc.approve(address(permit2), type(uint256).max);
 
@@ -216,7 +217,7 @@ contract HTLCCoordinatorPermit2Test is Test {
             deadline: block.timestamp + 1 hours
         });
 
-        bytes32 witness = _computeWitness(preimageHash, address(wbtc), bob, address(coordinator), timelock, calls);
+        bytes32 witness = _computeWitness(preimageHash, address(wbtc), bob, alice, timelock, calls);
         bytes memory signature = _signPermit2WitnessTransfer(permit, witness, alicePk);
 
         address relayer = makeAddr("relayer");
@@ -227,13 +228,17 @@ contract HTLCCoordinatorPermit2Test is Test {
 
         uint256 aliceWbtcBefore = wbtc.balanceOf(alice);
 
-        // Timelock expires, anyone calls refundTo
+        // Timelock expires; only the depositor can refund, and does so on the HTLC
         vm.warp(timelock + 1);
         address charlie = makeAddr("charlie");
         vm.prank(charlie);
-        coordinator.refundTo(preimageHash, wbtcAmount, address(wbtc), bob, timelock);
+        vm.expectPartialRevert(HTLCErc20.SwapNotActive.selector);
+        htlc.refund(preimageHash, wbtcAmount, address(wbtc), bob, timelock);
 
-        assertEq(wbtc.balanceOf(alice), aliceWbtcBefore + wbtcAmount, "alice should have WBTC back via refundTo");
+        vm.prank(alice);
+        htlc.refund(preimageHash, wbtcAmount, address(wbtc), bob, timelock);
+
+        assertEq(wbtc.balanceOf(alice), aliceWbtcBefore + wbtcAmount, "alice has the WBTC back");
     }
 
     // ---------------------------------------------------------------
@@ -254,7 +259,7 @@ contract HTLCCoordinatorPermit2Test is Test {
 
         // Sign with wrong private key
         (, uint256 wrongPk) = makeAddrAndKey("wrong");
-        bytes32 witness = _computeWitness(preimageHash, address(wbtc), bob, address(coordinator), timelock, calls);
+        bytes32 witness = _computeWitness(preimageHash, address(wbtc), bob, alice, timelock, calls);
         bytes memory signature = _signPermit2WitnessTransfer(permit, witness, wrongPk);
 
         vm.expectRevert();
@@ -280,7 +285,7 @@ contract HTLCCoordinatorPermit2Test is Test {
             deadline: block.timestamp + 1 hours
         });
 
-        bytes32 witness = _computeWitness(preimageHash, address(wbtc), bob, address(coordinator), timelock, signedCalls);
+        bytes32 witness = _computeWitness(preimageHash, address(wbtc), bob, alice, timelock, signedCalls);
         bytes memory signature = _signPermit2WitnessTransfer(permit, witness, alicePk);
 
         // Submit with different calls (attacker tries to steal tokens)
@@ -314,7 +319,7 @@ contract HTLCCoordinatorPermit2Test is Test {
         });
 
         // Sign with bob as claimAddress
-        bytes32 witness = _computeWitness(preimageHash, address(wbtc), bob, address(coordinator), timelock, calls);
+        bytes32 witness = _computeWitness(preimageHash, address(wbtc), bob, alice, timelock, calls);
         bytes memory signature = _signPermit2WitnessTransfer(permit, witness, alicePk);
 
         // Submit with attacker as claimAddress
@@ -346,7 +351,7 @@ contract HTLCCoordinatorPermit2Test is Test {
             deadline: block.timestamp + 1 hours
         });
 
-        bytes32 witness = _computeWitness(preimageHash, address(wbtc), bob, address(coordinator), timelock, calls);
+        bytes32 witness = _computeWitness(preimageHash, address(wbtc), bob, alice, timelock, calls);
         bytes memory signature = _signPermit2WitnessTransfer(permit, witness, alicePk);
 
         vm.expectPartialRevert(HTLCCoordinator.RestrictedTarget.selector);

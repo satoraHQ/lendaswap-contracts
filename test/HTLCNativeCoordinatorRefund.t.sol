@@ -6,23 +6,33 @@ import {HTLCNative} from "../src/HTLCNative.sol";
 import {HTLCNativeCoordinator} from "../src/HTLCNativeCoordinator.sol";
 import {CallExecutor} from "../src/CallExecutor.sol";
 
-/// @notice A depositor contract with no receive hook. refundTo cannot pay it: the
-///         coordinator has no refund path that runs calls, so such a depositor must
-///         not lock through it.
+/// @notice A depositor contract with no receive hook. It is the HTLC sender of what it
+///         locks, so it refunds through the HTLC's destination variant.
 contract NonReceivingDepositor {
     HTLCNativeCoordinator immutable c;
+    HTLCNative immutable h;
 
-    constructor(HTLCNativeCoordinator _c) {
+    constructor(HTLCNativeCoordinator _c, HTLCNative _h) {
         c = _c;
+        h = _h;
     }
 
-    function lock(bytes32 h, uint256 amount, address claim, uint256 tl) external payable {
+    function lock(bytes32 hash, uint256 amount, address claim, uint256 tl) external payable {
         CallExecutor.Call[] memory calls;
-        c.executeAndCreate{value: msg.value}(calls, h, amount, claim, tl);
+        c.executeAndCreate{value: msg.value}(calls, hash, amount, claim, tl);
     }
 
+    function refund(bytes32 hash, uint256 amount, address claim, uint256 tl) external {
+        h.refund(hash, amount, claim, tl);
+    }
+
+    function refundTo(bytes32 hash, uint256 amount, address claim, uint256 tl, address to) external {
+        h.refund(hash, amount, claim, tl, to);
+    }
 }
 
+/// @notice A swap locked through the coordinator is refunded on the HTLC by the
+///         depositor, who is its sender. The coordinator has no refund path.
 contract HTLCNativeCoordinatorRefundTest is NativeCoordinatorFixture {
     address stranger = makeAddr("stranger");
 
@@ -31,69 +41,87 @@ contract HTLCNativeCoordinatorRefundTest is NativeCoordinatorFixture {
         _lock();
     }
 
-    function test_refundTo_byStranger_paysDepositor() public {
+    function test_depositorRefundsOnTheHtlc() public {
         vm.warp(timelock);
-        vm.prank(stranger);
-        coordinator.refundTo(preimageHash, amount, bob, timelock);
+        vm.prank(alice);
+        htlc.refund(preimageHash, amount, bob, timelock);
 
         assertEq(alice.balance, 10 ether, "alice made whole");
-        assertEq(coordinator.deposits(_key(amount)), address(0), "deposit cleared");
         (HTLCNative.SwapState state,) = htlc.swapState(_key(amount));
         assertEq(uint8(state), uint8(HTLCNative.SwapState.Refunded), "refunded");
     }
 
-    function test_refundTo_beforeExpiry_reverts() public {
-        vm.prank(stranger);
+    function test_refundBeforeExpiry_reverts() public {
+        vm.prank(alice);
         vm.expectRevert(HTLCNative.TimelockNotExpired.selector);
-        coordinator.refundTo(preimageHash, amount, bob, timelock);
-        assertEq(coordinator.deposits(_key(amount)), alice, "deposit intact after revert");
+        htlc.refund(preimageHash, amount, bob, timelock);
+        assertTrue(_isActive(amount), "still locked");
     }
 
-    function test_refundTo_unknownKey_reverts() public {
+    function test_strangerCannotRefund() public {
         vm.warp(timelock);
-        vm.expectRevert(HTLCNativeCoordinator.UnknownHtlc.selector);
-        coordinator.refundTo(preimageHash, amount + 1, bob, timelock);
+        vm.prank(stranger);
+        vm.expectPartialRevert(HTLCNative.SwapNotActive.selector);
+        htlc.refund(preimageHash, amount, bob, timelock);
+        assertTrue(_isActive(amount), "still locked");
     }
 
-    function test_refundTo_twice_reverts() public {
+    /// `refundFor` on a coordinator-created swap pays the depositor; naming the
+    /// coordinator as sender addresses a key that was never created.
+    function test_refundFor_paysTheDepositor() public {
         vm.warp(timelock);
-        coordinator.refundTo(preimageHash, amount, bob, timelock);
-        vm.expectRevert(HTLCNativeCoordinator.UnknownHtlc.selector);
-        coordinator.refundTo(preimageHash, amount, bob, timelock);
+        vm.prank(stranger);
+        vm.expectPartialRevert(HTLCNative.SwapNotActive.selector);
+        htlc.refundFor(preimageHash, amount, address(coordinator), bob, timelock);
+
+        vm.prank(stranger);
+        htlc.refundFor(preimageHash, amount, alice, bob, timelock);
+
+        assertEq(alice.balance, 10 ether, "alice made whole");
+        assertEq(address(coordinator).balance, 0, "nothing landed in the coordinator");
+    }
+
+    function test_coordinatorIsNotTheSender() public {
+        vm.warp(timelock);
+        vm.prank(address(coordinator));
+        vm.expectPartialRevert(HTLCNative.SwapNotActive.selector);
+        htlc.refund(preimageHash, amount, bob, timelock);
     }
 
     function test_refundAfterRedeem_reverts() public {
         _redeemVia(noCalls, address(0), amount, bob);
         vm.warp(timelock);
-        // The redeem cleared the deposit record, so the coordinator rejects
-        // the refund before the HTLC would (SwapNotActive).
-        vm.expectRevert(HTLCNativeCoordinator.UnknownHtlc.selector);
-        coordinator.refundTo(preimageHash, amount, bob, timelock);
+        bytes memory err =
+            abi.encodeWithSelector(HTLCNative.SwapNotActive.selector, _key(amount), HTLCNative.SwapState.Redeemed);
+        vm.prank(alice);
+        vm.expectRevert(err);
+        htlc.refund(preimageHash, amount, bob, timelock);
     }
 
     function test_redeemAfterRefund_reverts() public {
         vm.warp(timelock);
-        coordinator.refundTo(preimageHash, amount, bob, timelock);
+        vm.prank(alice);
+        htlc.refund(preimageHash, amount, bob, timelock);
         (uint8 v, bytes32 r, bytes32 s) =
             _signRedeem(bobPk, address(coordinator), bob, address(0), amount, _callsHash(noCalls));
+        bytes memory err =
+            abi.encodeWithSelector(HTLCNative.SwapNotActive.selector, _key(amount), HTLCNative.SwapState.Refunded);
         vm.prank(relayer);
-        vm.expectRevert(
-            abi.encodeWithSelector(HTLCNative.SwapNotActive.selector, _key(amount), HTLCNative.SwapState.Refunded)
-        );
-        coordinator.redeemAndExecute(
-            preimage, amount, address(coordinator), timelock, noCalls, address(0), amount, bob, v, r, s
-        );
+        vm.expectRevert(err);
+        coordinator.redeemAndExecute(preimage, amount, alice, timelock, noCalls, address(0), amount, bob, v, r, s);
     }
 
-    function test_nonReceivableDepositor_refundToReverts() public {
-        NonReceivingDepositor nr = new NonReceivingDepositor(coordinator);
+    function test_nonReceivableDepositor_refundsToADestination() public {
+        NonReceivingDepositor nr = new NonReceivingDepositor(coordinator, htlc);
         vm.deal(address(nr), 2 ether);
         bytes32 h2 = sha256(abi.encodePacked(bytes32(uint256(0xcafe))));
         nr.lock{value: amount}(h2, amount, bob, timelock);
 
         vm.warp(timelock);
-        vm.prank(stranger);
         vm.expectRevert(HTLCNative.EtherTransferFailed.selector);
-        coordinator.refundTo(h2, amount, bob, timelock);
+        nr.refund(h2, amount, bob, timelock);
+
+        nr.refundTo(h2, amount, bob, timelock, stranger);
+        assertEq(stranger.balance, amount, "paid where the contract pointed");
     }
 }

@@ -323,7 +323,7 @@ async fn test_e2e_swap_then_lock_then_redeem() -> Result<()> {
             preimage_hash,
             WBTC,
             bob_address,
-            coordinator_address,
+            alice_address, // refundAddress = the depositor, who is the HTLC sender
             timelock,
             calls_hash,
         )
@@ -436,7 +436,7 @@ async fn test_e2e_swap_then_lock_then_redeem() -> Result<()> {
             preimage_hash,
             wbtc_in_htlc,
             WBTC,
-            coordinator_address, // sender = coordinator (it called HTLC.create)
+            alice_address, // sender = the depositor
             bob_address,
             timelock,
         )
@@ -474,7 +474,7 @@ async fn test_e2e_swap_then_lock_then_redeem() -> Result<()> {
             preimage,
             wbtc_in_htlc,
             WBTC,
-            coordinator_address, // sender = coordinator (created the HTLC)
+            alice_address, // sender = the depositor
             timelock,
         )
         .send()
@@ -520,7 +520,7 @@ async fn test_e2e_swap_then_lock_then_redeem() -> Result<()> {
             preimage_hash,
             wbtc_in_htlc,
             WBTC,
-            coordinator_address,
+            alice_address,
             bob_address,
             timelock,
         )

@@ -8,7 +8,8 @@ import {CallExecutor} from "../../src/CallExecutor.sol";
 import {MockWRBTC} from "../mocks/MockWRBTC.sol";
 
 /// @notice Shared setup for the HTLCNativeCoordinator suites: Alice locks RBTC for Bob
-///         through the coordinator, Bob claims by signature, a relayer submits.
+///         through the coordinator (she is the HTLC sender), Bob claims by signature,
+///         a relayer submits.
 abstract contract NativeCoordinatorFixture is Test {
     HTLCNative htlc;
     HTLCNativeCoordinator coordinator;
@@ -42,11 +43,11 @@ abstract contract NativeCoordinatorFixture is Test {
     // -- Helpers --
 
     function _key(uint256 _amount) internal view returns (SwapKey) {
-        return htlc.computeKey(preimageHash, _amount, address(0), address(coordinator), bob, timelock);
+        return htlc.computeKey(preimageHash, _amount, address(0), alice, bob, timelock);
     }
 
     function _isActive(uint256 _amount) internal view returns (bool) {
-        return htlc.isActive(preimageHash, _amount, address(0), address(coordinator), bob, timelock);
+        return htlc.isActive(preimageHash, _amount, address(0), alice, bob, timelock);
     }
 
     /// Alice locks `amount` with no calls.
@@ -77,7 +78,7 @@ abstract contract NativeCoordinatorFixture is Test {
                         htlc.TYPEHASH_REDEEM(),
                         preimage,
                         amount,
-                        address(coordinator),
+                        alice,
                         timelock,
                         caller,
                         destination,
@@ -103,7 +104,7 @@ abstract contract NativeCoordinatorFixture is Test {
         );
         vm.prank(relayer);
         coordinator.redeemAndExecute(
-            preimage, amount, address(coordinator), timelock, calls, sweepToken, minAmountOut, destination, v, r, s
+            preimage, amount, alice, timelock, calls, sweepToken, minAmountOut, destination, v, r, s
         );
     }
 
