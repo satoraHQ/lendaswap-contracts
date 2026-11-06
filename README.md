@@ -288,6 +288,17 @@ Addresses are lowercase: Rootstock tooling uses EIP-1191 checksums.
 
 - HTLCNative (v2): [`0x21e1b489ba2f12a854deae6dc67091f608cdacbc`](https://rootstock.blockscout.com/address/0x21e1b489ba2f12a854deae6dc67091f608cdacbc)
 
+RIF Relay (`contracts.rootstock.rif_relay`): rif-relay-contracts v2.2.1-beta.0,
+deployed 2026-10-27 at block 9361480, server `https://mainnet.relay.rifcomputing.net`.
+Use the full smart wallet: the SDK relays later claims from an already-deployed
+wallet, and the minimal wallet's relay verifier always rejects them.
+
+- RelayHub: `0xb277ef52c98e72e1f9afd4b36201d0b56368fec8`
+- SmartWalletFactory: `0x25c87343380eea565b6c664a8fd13b9b57c106cb`
+- SmartWallet template: `0x58ef89fce26afda106a44220fb96e2b72941df4e` (`factory.masterCopy()`)
+- DeployVerifier: `0x6f181c741a9869b42d58a7c7a7e4efd4cec57819`
+- RelayVerifier: `0x4b2b65677ca652c0badf00ffc52503c10e64411b`
+
 ### Rootstock Testnet (Chain ID: 31)
 
 Same salt, owner and bytecode as mainnet, so the same address (verified on
@@ -295,6 +306,16 @@ Same salt, owner and bytecode as mainnet, so the same address (verified on
 Served by the mutinynet daemon under `network.rootstock_chain_id: 31`.
 
 - HTLCNative (v2): [`0x21e1b489ba2f12a854deae6dc67091f608cdacbc`](https://rootstock-testnet.blockscout.com/address/0x21e1b489ba2f12a854deae6dc67091f608cdacbc)
+
+RIF Relay: the same full-wallet contracts, factory and template deployed
+2026-10-15, verifiers 2026-10-23 (the 2026-09-29 verifiers are rejected),
+server `https://satora.testnet.relay.rifcomputing.net`.
+
+- RelayHub: `0xd2efc2b1e5296235779a79b69e7511764e2fc8cd`
+- SmartWalletFactory: `0x85d9c99b8d2fb2f1cc5d54d4e15e3f39e66852b3`
+- SmartWallet template: `0x57dfe76c0cd3d755a6b2a5a4ceedc846cebf4754`
+- DeployVerifier: `0x3d52678c7329c75590d35b8415f83c6edf35bcf8`
+- RelayVerifier: `0x485c241b07868ce8174e52efffe135bcd4e2ade3`
 
 Testnet RBTC: https://faucet.rootstock.io. A fresh account sending two
 transactions back to back trips RSKj's per-account tx-pool quota ("account
